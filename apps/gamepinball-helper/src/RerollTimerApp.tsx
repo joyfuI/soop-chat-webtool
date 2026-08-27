@@ -1,0 +1,194 @@
+import Backdrop from '@mui/material/Backdrop';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import Stack from '@mui/material/Stack';
+import { ThemeProvider } from '@mui/material/styles';
+import TextField from '@mui/material/TextField';
+import Typography from '@mui/material/Typography';
+import type { ChangeEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { SoopChatEventMap } from 'soop-chat';
+
+import usePalette from './hooks/usePalette';
+import { useLocalStorage } from './hooks/useStorage';
+import { useSoopChat } from './SoopChatContext';
+import type { StoreType } from './types';
+
+type DonationEvent =
+  | SoopChatEventMap['sendBalloon']
+  | SoopChatEventMap['adconEffect'];
+
+const RerollTimerApp = () => {
+  const [step, setStep] = useState(0); // 0: 타이머 설정, 1: 타이머 시작, 2: 타이머 정지
+  const [isReroll, setIsReroll] = useState(false);
+  const timer = useRef<NodeJS.Timeout>(null);
+  const [rerollPrice] = useLocalStorage<StoreType['pinball.rerollPrice']>(
+    'pinball.rerollPrice',
+    1000,
+  );
+  const [minute, setMinute] = useLocalStorage<
+    StoreType['pinball.timer.minute']
+  >('pinball.timer.minute', 1);
+  const [mm, setMM] = useState(() => minute);
+  const [second, setSecond] = useLocalStorage<
+    StoreType['pinball.timer.second']
+  >('pinball.timer.second', 0);
+  const [ss, setSS] = useState(() => second);
+  const [id] = useLocalStorage<StoreType['setup.id']>('setup.id', '');
+
+  const { chat, connectChat } = useSoopChat();
+  const theme = usePalette();
+
+  const interval = useCallback(() => {
+    setSS((prevSS) => {
+      if (prevSS > 0) {
+        return prevSS - 1;
+      }
+      setMM((prevMM) => (prevMM > 0 ? prevMM - 1 : 0));
+      return 59;
+    });
+  }, []);
+
+  const handleClick = useCallback(() => {
+    switch (step) {
+      case 0:
+        // 타이머 시작
+        connectChat(id).catch(console.error);
+        timer.current = setInterval(interval, 1000);
+        setStep(1);
+        break;
+
+      case 1:
+        // 타이머 정지
+        chat?.disconnect();
+        if (timer.current) {
+          clearInterval(timer.current);
+        }
+        setStep(2);
+        break;
+
+      case 2:
+        // 타이머 초기화
+        setMM(minute);
+        setSS(second);
+        setStep(0);
+        break;
+    }
+  }, [step, id, minute, second, chat, connectChat, interval]);
+
+  useEffect(() => {
+    if (step === 1 && mm === 0 && ss === 0) {
+      handleClick();
+    }
+  }, [step, mm, ss, handleClick]);
+
+  useEffect(() => {
+    const handleDonation = (event: DonationEvent) => {
+      if (step === 1 && event.data.count === rerollPrice) {
+        handleClick();
+        setIsReroll(true);
+      }
+    };
+
+    const sendBalloonOff = chat?.on('sendBalloon', (event) => {
+      console.log(
+        'sendBalloon',
+        new Date(event.receivedAt).toLocaleString(),
+        event.data,
+      );
+      handleDonation(event);
+    });
+    const adconEffectOff = chat?.on('adconEffect', (event) => {
+      console.log(
+        'adconEffect',
+        new Date(event.receivedAt).toLocaleString(),
+        event.data,
+      );
+      handleDonation(event);
+    });
+    return () => {
+      sendBalloonOff?.();
+      adconEffectOff?.();
+    };
+  }, [chat, step, rerollPrice, handleClick]);
+
+  const handleMinuteChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = parseInt(e.target.value, 10) || 0;
+    setMinute(value);
+    setMM(value);
+  };
+
+  const handleSecondChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = parseInt(e.target.value, 10) || 0;
+    setSecond(value);
+    setSS(value);
+  };
+
+  const handleBackdropClick = () => {
+    setIsReroll(false);
+  };
+
+  return (
+    <ThemeProvider theme={theme}>
+      <Box
+        sx={{
+          width: '100vw',
+          height: '100vh',
+          p: 2,
+          overflow: 'hidden',
+          alignContent: 'center',
+        }}
+      >
+        <Typography gutterBottom variant="h5">
+          리롤 {rerollPrice}개
+        </Typography>
+        <Stack direction="row" spacing={1}>
+          <TextField
+            disabled={step !== 0}
+            fullWidth
+            onChange={handleMinuteChange}
+            slotProps={{
+              htmlInput: { min: 0, max: 59, step: 1, inputMode: 'numeric' },
+            }}
+            sx={{ '& .MuiInputBase-input': { py: 1, fontSize: 30 } }}
+            type="number"
+            value={mm.toString().padStart(2, '0')}
+            variant="outlined"
+          />
+          <Typography sx={{ alignSelf: 'center', fontSize: 30 }}>:</Typography>
+          <TextField
+            disabled={step !== 0}
+            fullWidth
+            onChange={handleSecondChange}
+            slotProps={{
+              htmlInput: { min: 0, max: 59, step: 1, inputMode: 'numeric' },
+            }}
+            sx={{ '& .MuiInputBase-input': { py: 1, fontSize: 30 } }}
+            type="number"
+            value={ss.toString().padStart(2, '0')}
+            variant="outlined"
+          />
+          <Button
+            onClick={handleClick}
+            sx={{ minWidth: 80 }}
+            variant="contained"
+          >
+            {['시작', '정지', '초기화'][step]}
+          </Button>
+        </Stack>
+
+        <Backdrop
+          onClick={handleBackdropClick}
+          open={isReroll}
+          sx={{ backgroundColor: 'rgba(0, 0, 0, 0.9)', cursor: 'pointer' }}
+        >
+          <Typography sx={{ color: '#fff' }} variant="h3">
+            리롤!!
+          </Typography>
+        </Backdrop>
+      </Box>
+    </ThemeProvider>
+  );
+};
+
+export default RerollTimerApp;

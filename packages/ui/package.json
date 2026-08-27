@@ -1,0 +1,26 @@
+{
+  "name": "@joyfui/ui",
+  "private": true,
+  "exports": { "./*": "./src/*.tsx" },
+  "scripts": {
+    "format": "biome format --write",
+    "lint": "biome lint --write",
+    "check": "biome check --write",
+    "reporter": "biome check --reporter=summary",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@joyfui/typescript-config": "workspace:*",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:"
+  },
+  "dependencies": {
+    "@emotion/react": "catalog:",
+    "@emotion/styled": "catalog:",
+    "@mui/icons-material": "catalog:",
+    "@mui/material": "catalog:",
+    "@mui/utils": "^9.3.0",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@joyfui/api-client",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "format": "biome format --write",
+    "lint": "biome lint --write",
+    "check": "biome check --write",
+    "reporter": "biome check --reporter=summary",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": { "@joyfui/typescript-config": "workspace:*" },
+  "dependencies": { "api": "workspace:*", "hono": "catalog:" }
+}
