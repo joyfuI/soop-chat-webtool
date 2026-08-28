@@ -22,14 +22,14 @@
     "notistack": "^3.0.2",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "soop-chat": "^0.1.0"
+    "soop-chat": "catalog:"
   },
   "devDependencies": {
     "@babel/core": "^8.0.1",
     "@joyfui/typescript-config": "workspace:*",
     "@rolldown/plugin-babel": "^0.2.3",
     "@types/babel__core": "^7.20.5",
-    "@types/node": "^26.3.0",
+    "@types/node": "^26.4.0",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "^6.0.4",

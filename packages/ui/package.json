@@ -17,9 +17,8 @@
   "dependencies": {
     "@emotion/react": "catalog:",
     "@emotion/styled": "catalog:",
-    "@mui/icons-material": "catalog:",
     "@mui/material": "catalog:",
-    "@mui/utils": "^9.3.0",
+    "@mui/utils": "^9.4.0",
     "react": "catalog:",
     "react-dom": "catalog:"
   }
