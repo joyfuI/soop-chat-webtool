@@ -2,14 +2,12 @@ import Backdrop from '@mui/material/Backdrop';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
-import { ThemeProvider } from '@mui/material/styles';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import type { ChangeEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SoopChatEventMap } from 'soop-chat';
 
-import usePalette from './hooks/usePalette';
 import { useLocalStorage } from './hooks/useStorage';
 import { useSoopChat } from './SoopChatContext';
 import type { StoreType } from './types';
@@ -37,7 +35,6 @@ const RerollTimerApp = () => {
   const [id] = useLocalStorage<StoreType['setup.id']>('setup.id', '');
 
   const { chat, connectChat } = useSoopChat();
-  const theme = usePalette();
 
   const interval = useCallback(() => {
     setSS((prevSS) => {
@@ -83,28 +80,28 @@ const RerollTimerApp = () => {
   }, [step, mm, ss, handleClick]);
 
   useEffect(() => {
-    const handleDonation = (event: DonationEvent) => {
-      if (step === 1 && event.data.count === rerollPrice) {
+    const handleDonation = (e: DonationEvent) => {
+      if (step === 1 && e.data.count === rerollPrice) {
         handleClick();
         setIsReroll(true);
       }
     };
 
-    const sendBalloonOff = chat?.on('sendBalloon', (event) => {
+    const sendBalloonOff = chat?.on('sendBalloon', (e) => {
       console.log(
         'sendBalloon',
-        new Date(event.receivedAt).toLocaleString(),
-        event.data,
+        new Date(e.receivedAt).toLocaleString(),
+        e.data,
       );
-      handleDonation(event);
+      handleDonation(e);
     });
-    const adconEffectOff = chat?.on('adconEffect', (event) => {
+    const adconEffectOff = chat?.on('adconEffect', (e) => {
       console.log(
         'adconEffect',
-        new Date(event.receivedAt).toLocaleString(),
-        event.data,
+        new Date(e.receivedAt).toLocaleString(),
+        e.data,
       );
-      handleDonation(event);
+      handleDonation(e);
     });
     return () => {
       sendBalloonOff?.();
@@ -129,65 +126,59 @@ const RerollTimerApp = () => {
   };
 
   return (
-    <ThemeProvider theme={theme}>
-      <Box
-        sx={{
-          width: '100vw',
-          height: '100vh',
-          p: 2,
-          overflow: 'hidden',
-          alignContent: 'center',
-        }}
-      >
-        <Typography gutterBottom variant="h5">
-          리롤 {rerollPrice}개
-        </Typography>
-        <Stack direction="row" spacing={1}>
-          <TextField
-            disabled={step !== 0}
-            fullWidth
-            onChange={handleMinuteChange}
-            slotProps={{
-              htmlInput: { min: 0, max: 59, step: 1, inputMode: 'numeric' },
-            }}
-            sx={{ '& .MuiInputBase-input': { py: 1, fontSize: 30 } }}
-            type="number"
-            value={mm.toString().padStart(2, '0')}
-            variant="outlined"
-          />
-          <Typography sx={{ alignSelf: 'center', fontSize: 30 }}>:</Typography>
-          <TextField
-            disabled={step !== 0}
-            fullWidth
-            onChange={handleSecondChange}
-            slotProps={{
-              htmlInput: { min: 0, max: 59, step: 1, inputMode: 'numeric' },
-            }}
-            sx={{ '& .MuiInputBase-input': { py: 1, fontSize: 30 } }}
-            type="number"
-            value={ss.toString().padStart(2, '0')}
-            variant="outlined"
-          />
-          <Button
-            onClick={handleClick}
-            sx={{ minWidth: 80 }}
-            variant="contained"
-          >
-            {['시작', '정지', '초기화'][step]}
-          </Button>
-        </Stack>
+    <Box
+      sx={{
+        width: '100vw',
+        height: '100vh',
+        p: 2,
+        overflow: 'hidden',
+        alignContent: 'center',
+      }}
+    >
+      <Typography gutterBottom variant="h5">
+        리롤 {rerollPrice}개
+      </Typography>
+      <Stack direction="row" spacing={1}>
+        <TextField
+          disabled={step !== 0}
+          fullWidth
+          onChange={handleMinuteChange}
+          slotProps={{
+            htmlInput: { min: 0, max: 59, step: 1, inputMode: 'numeric' },
+          }}
+          sx={{ '& .MuiInputBase-input': { py: 1, fontSize: 30 } }}
+          type="number"
+          value={mm.toString().padStart(2, '0')}
+          variant="outlined"
+        />
+        <Typography sx={{ alignSelf: 'center', fontSize: 30 }}>:</Typography>
+        <TextField
+          disabled={step !== 0}
+          fullWidth
+          onChange={handleSecondChange}
+          slotProps={{
+            htmlInput: { min: 0, max: 59, step: 1, inputMode: 'numeric' },
+          }}
+          sx={{ '& .MuiInputBase-input': { py: 1, fontSize: 30 } }}
+          type="number"
+          value={ss.toString().padStart(2, '0')}
+          variant="outlined"
+        />
+        <Button onClick={handleClick} sx={{ minWidth: 80 }} variant="contained">
+          {['시작', '정지', '초기화'][step]}
+        </Button>
+      </Stack>
 
-        <Backdrop
-          onClick={handleBackdropClick}
-          open={isReroll}
-          sx={{ backgroundColor: 'rgba(0, 0, 0, 0.9)', cursor: 'pointer' }}
-        >
-          <Typography sx={{ color: '#fff' }} variant="h3">
-            리롤!!
-          </Typography>
-        </Backdrop>
-      </Box>
-    </ThemeProvider>
+      <Backdrop
+        onClick={handleBackdropClick}
+        open={isReroll}
+        sx={{ backgroundColor: 'rgba(0, 0, 0, 0.9)', cursor: 'pointer' }}
+      >
+        <Typography sx={{ color: '#fff' }} variant="h3">
+          리롤!!
+        </Typography>
+      </Backdrop>
+    </Box>
   );
 };
 

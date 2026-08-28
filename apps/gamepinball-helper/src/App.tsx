@@ -4,7 +4,6 @@ import Looks4Icon from '@mui/icons-material/Looks4';
 import LooksOneIcon from '@mui/icons-material/LooksOne';
 import LooksTwoIcon from '@mui/icons-material/LooksTwo';
 import Container from '@mui/material/Container';
-import { ThemeProvider } from '@mui/material/styles';
 import { useSnackbar } from 'notistack';
 import type { SyntheticEvent } from 'react';
 import { useEffect, useRef } from 'react';
@@ -13,7 +12,6 @@ import type { SoopChatEventMap } from 'soop-chat';
 import LinkDial from './components/LinkDial';
 import donationCalc from './helper/donationCalc';
 import sanitizeText from './helper/sanitizeText';
-import usePalette from './hooks/usePalette';
 import { useLocalStorage } from './hooks/useStorage';
 import Pinball from './Pinball';
 import Progress from './Progress';
@@ -39,14 +37,13 @@ const App = () => {
   const [, setReview] = useLocalStorage<StoreType['review']>('review', {});
 
   const { chat } = useSoopChat();
-  const theme = usePalette();
   const { enqueueSnackbar } = useSnackbar();
 
   // 도네이션 응답과 도네이션 전자녀(일반 텍스트) 응답이 따로 오기 때문에
   // 도네이션 응답을 받으면 일반 텍스트 응답을 기다렸다가 합친다.
   useEffect(() => {
-    const handleDonation = (event: DonationEvent) => {
-      const userId = event.data.senderId.replace(REGEXP, '');
+    const handleDonation = (e: DonationEvent) => {
+      const userId = e.data.senderId.replace(REGEXP, '');
       if (!pendingDonation.current.has(userId)) {
         pendingDonation.current.set(userId, []);
       }
@@ -58,31 +55,31 @@ const App = () => {
         }
       }, 30000); // 메시지 시간 제한
       queue.push({
-        receivedAt: new Date(event.receivedAt).toISOString(),
-        type: event.type,
-        amount: event.data.count,
+        receivedAt: new Date(e.receivedAt).toISOString(),
+        type: e.type,
+        amount: e.data.count,
         userId,
-        username: event.data.senderNickname,
+        username: e.data.senderNickname,
         message: '',
         timer,
       });
     };
 
-    const sendBalloonOff = chat?.on('sendBalloon', (event) => {
+    const sendBalloonOff = chat?.on('sendBalloon', (e) => {
       console.log(
         'sendBalloon',
-        new Date(event.receivedAt).toLocaleString(),
-        event.data,
+        new Date(e.receivedAt).toLocaleString(),
+        e.data,
       );
-      handleDonation(event);
+      handleDonation(e);
     });
-    const adconEffectOff = chat?.on('adconEffect', (event) => {
+    const adconEffectOff = chat?.on('adconEffect', (e) => {
       console.log(
         'adconEffect',
-        new Date(event.receivedAt).toLocaleString(),
-        event.data,
+        new Date(e.receivedAt).toLocaleString(),
+        e.data,
       );
-      handleDonation(event);
+      handleDonation(e);
     });
     return () => {
       sendBalloonOff?.();
@@ -91,13 +88,13 @@ const App = () => {
   }, [chat]);
   useEffect(
     () =>
-      chat?.on('chatMessage', (event) => {
+      chat?.on('chatMessage', (e) => {
         console.log(
           'chatMessage',
-          new Date(event.receivedAt).toLocaleString(),
-          event.data,
+          new Date(e.receivedAt).toLocaleString(),
+          e.data,
         );
-        const userId = event.data.senderId.replace(REGEXP, '');
+        const userId = e.data.senderId.replace(REGEXP, '');
         const queue = pendingDonation.current.get(userId) ?? [];
         if (queue.length > 0) {
           const donation = queue.shift();
@@ -108,8 +105,8 @@ const App = () => {
               type: donation.type,
               amount: donation.amount,
               userId,
-              username: event.data.senderNickname,
-              message: event.data.message,
+              username: e.data.senderNickname,
+              message: e.data.message,
             };
             const calcResult = donationCalc(data); // 단가 계산
             if (calcResult) {
@@ -142,27 +139,25 @@ const App = () => {
   };
 
   return (
-    <ThemeProvider theme={theme}>
-      <Container component="main" sx={{ p: 4 }}>
-        <Navigation
-          actions={[
-            { icon: <LooksOneIcon />, label: '준비' },
-            { icon: <LooksTwoIcon />, label: '진행' },
-            { icon: <Looks3Icon />, label: '검토' },
-            { icon: <Looks4Icon />, label: '핀볼' },
-          ]}
-          keepMounted
-          onChange={handleChange}
-          value={tab}
-        >
-          <Setup />
-          <Progress />
-          <Review />
-          <Pinball />
-        </Navigation>
-        <LinkDial />
-      </Container>
-    </ThemeProvider>
+    <Container component="main" sx={{ p: 4 }}>
+      <Navigation
+        actions={[
+          { icon: <LooksOneIcon />, label: '준비' },
+          { icon: <LooksTwoIcon />, label: '진행' },
+          { icon: <Looks3Icon />, label: '검토' },
+          { icon: <Looks4Icon />, label: '핀볼' },
+        ]}
+        keepMounted
+        onChange={handleChange}
+        value={tab}
+      >
+        <Setup />
+        <Progress />
+        <Review />
+        <Pinball />
+      </Navigation>
+      <LinkDial />
+    </Container>
   );
 };
 

@@ -4,6 +4,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App';
+import PaletteProvider from './PaletteProvider';
 import RerollTimerApp from './RerollTimerApp';
 import { SoopChatProvider } from './SoopChatContext';
 
@@ -14,17 +15,19 @@ if (rootElement && !rootElement.innerHTML) {
   root.render(
     <StrictMode>
       <UIProvider>
-        <SnackbarProvider>
-          {windowType === 'reroll-timer' ? (
-            <SoopChatProvider>
-              <RerollTimerApp />
-            </SoopChatProvider>
-          ) : (
-            <SoopChatProvider>
-              <App />
-            </SoopChatProvider>
-          )}
-        </SnackbarProvider>
+        <PaletteProvider>
+          <SnackbarProvider>
+            {windowType === 'reroll-timer' ? (
+              <SoopChatProvider>
+                <RerollTimerApp />
+              </SoopChatProvider>
+            ) : (
+              <SoopChatProvider>
+                <App />
+              </SoopChatProvider>
+            )}
+          </SnackbarProvider>
+        </PaletteProvider>
       </UIProvider>
     </StrictMode>,
   );
