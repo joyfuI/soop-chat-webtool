@@ -14,7 +14,11 @@ const FormLabel = ({ children, label, description }: FormLabelProps) => {
         {label}
       </Typography>
       {description ? (
-        <Typography gutterBottom sx={{ display: 'block' }} variant="caption">
+        <Typography
+          gutterBottom
+          sx={{ display: 'block', whiteSpace: 'pre-wrap' }}
+          variant="body2"
+        >
           {description}
         </Typography>
       ) : null}
