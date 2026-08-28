@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useRef, useSyncExternalStore } from 'react';
 
 type StorageEventType = 'localstorage' | 'sessionstorage';
 type CustomStorageEvent = CustomEvent<{ key: string }>;
@@ -50,33 +50,35 @@ const useStorage = <T>(
 
   const item = useSyncExternalStore(subscribe, getSnapshot);
 
-  const storedValue = useMemo(() => {
-    try {
-      if (item) {
-        return JSON.parse(item) as T;
+  const getInitialValue = useCallback((): T => {
+    const value = initialValueRef.current;
+    return typeof value === 'function' ? (value as () => T)() : value;
+  }, []);
+
+  const parseValue = useCallback(
+    (item: string | null): T => {
+      try {
+        return item !== null ? (JSON.parse(item) as T) : getInitialValue();
+      } catch {
+        return getInitialValue();
       }
-      return typeof initialValueRef.current === 'function'
-        ? (initialValueRef.current as () => T)()
-        : initialValueRef.current;
-    } catch {
-      return typeof initialValueRef.current === 'function'
-        ? (initialValueRef.current as () => T)()
-        : initialValueRef.current;
-    }
-  }, [item]);
-  const storedValueRef = useRef(storedValue);
-  storedValueRef.current = storedValue;
+    },
+    [getInitialValue],
+  );
+
+  const storedValue = parseValue(item);
 
   const setValue = useCallback(
     (newValue: T | ((oldValue: T) => T)) => {
+      const oldValue = parseValue(storage.getItem(key)); // 업데이트 시점에 다시 읽기
       const value =
         typeof newValue === 'function'
-          ? (newValue as (oldValue: T) => T)(storedValueRef.current)
+          ? (newValue as (oldValue: T) => T)(oldValue)
           : newValue;
       storage.setItem(key, JSON.stringify(value));
       window.dispatchEvent(new CustomEvent(eventType, { detail: { key } })); // 커스텀 이벤트 발생
     },
-    [storage, eventType, key],
+    [storage, eventType, key, parseValue],
   );
 
   const delValue = useCallback(() => {

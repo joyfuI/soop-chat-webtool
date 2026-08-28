@@ -15,10 +15,10 @@ const donationCalc = (data: DonationData, skipPriceCheck: boolean = false) => {
   const priceList = ((): StoreType['setup.priceList'] => {
     try {
       return JSON.parse(
-        window.localStorage.getItem('setup.priceList') ?? '[50,200]',
+        window.localStorage.getItem('setup.priceList') ?? '[50, 200]',
       );
     } catch {
-      return [];
+      return [50, 200];
     }
   })();
   const price = !skipPriceCheck
