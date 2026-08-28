@@ -41,10 +41,15 @@ const Pinball = () => {
   };
 
   const handleOpenClick = () => {
+    const width = 320;
+    const height = 140;
+    const left = Math.round(window.screenX + (window.outerWidth - width) / 2);
+    const top = Math.round(window.screenY + (window.outerHeight - height) / 2);
+
     const popup = window.open(
       '?window=reroll-timer',
       'reroll-timer',
-      objectToFeatures({ popup: true, width: 320, height: 140 }),
+      objectToFeatures({ popup: true, width, height, left, top }),
     );
     if (!popup) {
       alert('팝업을 허용해주세요.');
