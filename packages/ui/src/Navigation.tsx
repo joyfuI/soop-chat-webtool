@@ -1,9 +1,6 @@
-import Looks3Icon from '@mui/icons-material/Looks3';
-import Looks4Icon from '@mui/icons-material/Looks4';
-import LooksOneIcon from '@mui/icons-material/LooksOne';
-import LooksTwoIcon from '@mui/icons-material/LooksTwo';
 import type { BottomNavigationProps } from '@mui/material/BottomNavigation';
 import BottomNavigation from '@mui/material/BottomNavigation';
+import type { BottomNavigationActionProps } from '@mui/material/BottomNavigationAction';
 import BottomNavigationAction from '@mui/material/BottomNavigationAction';
 import Box from '@mui/material/Box';
 import Paper from '@mui/material/Paper';
@@ -11,19 +8,31 @@ import type { PropsWithChildren } from 'react';
 import { Children } from 'react';
 
 export type NavigationProps = PropsWithChildren<{
+  actions: BottomNavigationActionProps[];
   value?: BottomNavigationProps['value'];
+  keepMounted?: boolean;
   onChange?: BottomNavigationProps['onChange'];
 }>;
 
-const Navigation = ({ children, value, onChange }: NavigationProps) => {
+const Navigation = ({
+  children,
+  actions,
+  value,
+  keepMounted,
+  onChange,
+}: NavigationProps) => {
   return (
     <>
       <Box sx={{ pb: 7 }}>
-        {Children.map(children, (child, index) => (
-          <div hidden={value !== index} role="tabpanel">
-            {child}
-          </div>
-        ))}
+        {Children.map(children, (child, index) =>
+          keepMounted ? (
+            <div hidden={value !== index} role="tabpanel">
+              {child}
+            </div>
+          ) : value === index ? (
+            child
+          ) : null,
+        )}
       </Box>
 
       <Paper
@@ -31,10 +40,9 @@ const Navigation = ({ children, value, onChange }: NavigationProps) => {
         sx={{ position: 'fixed', bottom: 0, left: 0, right: 0 }}
       >
         <BottomNavigation onChange={onChange} showLabels value={value}>
-          <BottomNavigationAction icon={<LooksOneIcon />} label="준비" />
-          <BottomNavigationAction icon={<LooksTwoIcon />} label="진행" />
-          <BottomNavigationAction icon={<Looks3Icon />} label="검토" />
-          <BottomNavigationAction icon={<Looks4Icon />} label="핀볼" />
+          {actions.map((action, i) => (
+            <BottomNavigationAction key={action.key ?? i} {...action} />
+          ))}
         </BottomNavigation>
       </Paper>
     </>

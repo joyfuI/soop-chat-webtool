@@ -1,3 +1,8 @@
+import Navigation from '@joyfui/ui/Navigation';
+import Looks3Icon from '@mui/icons-material/Looks3';
+import Looks4Icon from '@mui/icons-material/Looks4';
+import LooksOneIcon from '@mui/icons-material/LooksOne';
+import LooksTwoIcon from '@mui/icons-material/LooksTwo';
 import Container from '@mui/material/Container';
 import { ThemeProvider } from '@mui/material/styles';
 import { useSnackbar } from 'notistack';
@@ -6,7 +11,6 @@ import { useEffect, useRef } from 'react';
 import type { SoopChatEventMap } from 'soop-chat';
 
 import LinkDial from './components/LinkDial';
-import Navigation from './components/Navigation';
 import donationCalc from './helper/donationCalc';
 import sanitizeText from './helper/sanitizeText';
 import usePalette from './hooks/usePalette';
@@ -140,7 +144,17 @@ const App = () => {
   return (
     <ThemeProvider theme={theme}>
       <Container component="main" sx={{ p: 4 }}>
-        <Navigation onChange={handleChange} value={tab}>
+        <Navigation
+          actions={[
+            { icon: <LooksOneIcon />, label: '준비' },
+            { icon: <LooksTwoIcon />, label: '진행' },
+            { icon: <Looks3Icon />, label: '검토' },
+            { icon: <Looks4Icon />, label: '핀볼' },
+          ]}
+          keepMounted
+          onChange={handleChange}
+          value={tab}
+        >
           <Setup />
           <Progress />
           <Review />
