@@ -22,6 +22,8 @@ type DonationEvent =
   | SoopChatEventMap['sendBalloon']
   | SoopChatEventMap['adconEffect'];
 
+const REGEXP = /\(\d+\)$/;
+
 const App = () => {
   const pendingDonation = useRef(
     new Map<string, (DonationData & { timer: NodeJS.Timeout })[]>(),
@@ -40,23 +42,23 @@ const App = () => {
   // 도네이션 응답을 받으면 일반 텍스트 응답을 기다렸다가 합친다.
   useEffect(() => {
     const handleDonation = (event: DonationEvent) => {
-      const username = event.data.senderNickname;
-      if (!pendingDonation.current.has(username)) {
-        pendingDonation.current.set(username, []);
+      const userId = event.data.senderId.replace(REGEXP, '');
+      if (!pendingDonation.current.has(userId)) {
+        pendingDonation.current.set(userId, []);
       }
-      const queue = pendingDonation.current.get(username) ?? [];
+      const queue = pendingDonation.current.get(userId) ?? [];
       const timer = setTimeout(() => {
         queue.shift();
         if (queue.length === 0) {
-          pendingDonation.current.delete(username);
+          pendingDonation.current.delete(userId);
         }
       }, 30000); // 메시지 시간 제한
       queue.push({
         receivedAt: new Date(event.receivedAt).toISOString(),
         type: event.type,
         amount: event.data.count,
-        username,
-        userId: event.data.senderId,
+        userId,
+        username: event.data.senderNickname,
         message: '',
         timer,
       });
@@ -91,8 +93,8 @@ const App = () => {
           new Date(event.receivedAt).toLocaleString(),
           event.data,
         );
-        const username = event.data.senderNickname;
-        const queue = pendingDonation.current.get(username) ?? [];
+        const userId = event.data.senderId.replace(REGEXP, '');
+        const queue = pendingDonation.current.get(userId) ?? [];
         if (queue.length > 0) {
           const donation = queue.shift();
           if (donation) {
@@ -101,8 +103,8 @@ const App = () => {
               receivedAt: donation.receivedAt,
               type: donation.type,
               amount: donation.amount,
-              username,
-              userId: event.data.senderId,
+              userId,
+              username: event.data.senderNickname,
               message: event.data.message,
             };
             const calcResult = donationCalc(data); // 단가 계산
@@ -124,7 +126,7 @@ const App = () => {
             }
           }
           if (queue.length === 0) {
-            pendingDonation.current.delete(username);
+            pendingDonation.current.delete(userId);
           }
         }
       }),
