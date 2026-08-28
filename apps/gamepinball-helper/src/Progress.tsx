@@ -49,7 +49,7 @@ const Progress = () => {
   return (
     <>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-        <Typography sx={{ minWidth: 'fit-content' }} variant="caption">
+        <Typography sx={{ minWidth: 'fit-content' }} variant="body2">
           글자크기
         </Typography>
         <Slider

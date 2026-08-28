@@ -95,7 +95,7 @@ const Review = () => {
         spacing={1}
         sx={{ mb: 2, alignItems: 'center', justifyContent: 'space-between' }}
       >
-        <Typography sx={{ minWidth: 'fit-content' }} variant="caption">
+        <Typography sx={{ minWidth: 'fit-content' }} variant="body2">
           여기서 별풍선과 별개로 핀볼을 수정할 수 있습니다.
         </Typography>
         <Fab
