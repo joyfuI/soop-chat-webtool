@@ -48,6 +48,7 @@ const route = app.get(
   ),
   async (c) => {
     const { streamerId } = c.req.valid('query');
+    c.header('Cache-Control', 'no-store');
     try {
       const channel = await resolveNodeChannel(streamerId, {
         signal: c.req.raw.signal,
