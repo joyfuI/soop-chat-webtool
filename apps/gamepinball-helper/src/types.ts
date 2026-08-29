@@ -16,7 +16,7 @@ export type DonationData = {
 
 export type StoreType = {
   tab: number; // 0
-  'setup.id': string; // ''
+  'setup.streamerId': string; // ''
   'setup.rule': string; // ''
   'setup.priceList': number[]; // [50, 200]
   'progress.fontSize': number; // 40

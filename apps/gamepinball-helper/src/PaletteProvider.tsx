@@ -7,10 +7,13 @@ import palette from './shared/palette.json';
 import type { StoreType } from './types';
 
 const PaletteProvider = ({ children }: PropsWithChildren) => {
-  const [id] = useLocalStorage<StoreType['setup.id']>('setup.id', '');
+  const [streamerId] = useLocalStorage<StoreType['setup.streamerId']>(
+    'setup.streamerId',
+    '',
+  );
 
   const theme = createTheme({
-    palette: (palette as Record<string, PaletteOptions>)[id],
+    palette: (palette as Record<string, PaletteOptions>)[streamerId],
   });
 
   return <ThemeProvider theme={theme}>{children}</ThemeProvider>;

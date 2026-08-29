@@ -32,7 +32,10 @@ const RerollTimerApp = () => {
     StoreType['pinball.timer.second']
   >('pinball.timer.second', 0);
   const [ss, setSS] = useState(() => second);
-  const [id] = useLocalStorage<StoreType['setup.id']>('setup.id', '');
+  const [streamerId] = useLocalStorage<StoreType['setup.streamerId']>(
+    'setup.streamerId',
+    '',
+  );
 
   const { chat, connectChat } = useSoopChat();
 
@@ -50,7 +53,7 @@ const RerollTimerApp = () => {
     switch (step) {
       case 0:
         // 타이머 시작
-        connectChat(id).catch(console.error);
+        connectChat(streamerId).catch(console.error);
         timer.current = setInterval(interval, 1000);
         setStep(1);
         break;
@@ -71,7 +74,7 @@ const RerollTimerApp = () => {
         setStep(0);
         break;
     }
-  }, [step, id, minute, second, chat, connectChat, interval]);
+  }, [step, streamerId, minute, second, chat, connectChat, interval]);
 
   useEffect(() => {
     if (step === 1 && mm === 0 && ss === 0) {

@@ -21,17 +21,19 @@ const Progress = () => {
     'progress.donationList',
     [],
   );
-  const [id] = useLocalStorage<StoreType['setup.id']>('setup.id', '');
+  const [streamerId] = useLocalStorage<StoreType['setup.streamerId']>(
+    'setup.streamerId',
+    '',
+  );
   const [rule] = useLocalStorage<StoreType['setup.rule']>('setup.rule', '');
   const theme = useTheme();
 
   const { chat, connectChat } = useSoopChat();
   const chatState = useChatState();
-  const isPlay = chatState === 'connected';
 
   const playSoopChat = async () => {
     try {
-      await connectChat(id);
+      await connectChat(streamerId);
     } catch (e) {
       console.error(e);
       alert('채팅 연결 실패!');
@@ -60,12 +62,10 @@ const Progress = () => {
           value={fontSize}
           valueLabelDisplay="auto"
         />
-        {!isPlay ? (
+        {chatState !== 'connected' ? (
           <Fab
             color="primary"
-            disabled={['resolving', 'connecting', 'reconnecting'].includes(
-              chatState ?? '',
-            )}
+            disabled={chatState === 'connecting'}
             onClick={playSoopChat}
             sx={{ minWidth: 'fit-content' }}
             variant="extended"

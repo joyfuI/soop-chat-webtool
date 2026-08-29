@@ -5,12 +5,15 @@ import TextField from '@mui/material/TextField';
 import type { ChangeEvent } from 'react';
 
 import PriceList from './components/PriceList';
+import useChatState from './hooks/useChatState';
 import { useLocalStorage } from './hooks/useStorage';
 import { useSoopChat } from './SoopChatContext';
 import type { StoreType } from './types';
 
 const Setup = () => {
-  const [id, setId] = useLocalStorage<StoreType['setup.id']>('setup.id', '');
+  const [streamerId, setStreamerId] = useLocalStorage<
+    StoreType['setup.streamerId']
+  >('setup.streamerId', '');
   const [rule, setRule] = useLocalStorage<StoreType['setup.rule']>(
     'setup.rule',
     '',
@@ -20,6 +23,7 @@ const Setup = () => {
   >('setup.priceList', [50, 200]);
 
   const { chat } = useSoopChat();
+  const chatState = useChatState();
 
   const handleAdd = (value: number) => {
     if (!Number.isNaN(value) && value >= 0) {
@@ -36,7 +40,7 @@ const Setup = () => {
   };
 
   const handleIdChange = (e: ChangeEvent<HTMLInputElement>) => {
-    setId(e.target.value);
+    setStreamerId(e.target.value);
   };
 
   const handleRuleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
@@ -62,7 +66,12 @@ const Setup = () => {
         description="채팅을 연결할 스트리머의 SOOP ID를 입력하세요."
         label="SOOP ID"
       >
-        <TextField onChange={handleIdChange} value={id} variant="outlined" />
+        <TextField
+          disabled={chatState !== 'disconnected'}
+          onChange={handleIdChange}
+          value={streamerId}
+          variant="outlined"
+        />
       </FormLabel>
 
       <FormLabel
