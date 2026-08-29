@@ -23,7 +23,8 @@ export const SoopChatProvider = ({ children }: PropsWithChildren) => {
           { init: { signal } },
         );
         if (!response.ok) {
-          throw new Error('채널 정보를 가져오지 못했습니다.');
+          const data = await response.json();
+          throw new Error(data.message);
         }
         return response.json();
       },

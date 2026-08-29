@@ -53,7 +53,7 @@ const route = app.get(
       const channel = await resolveNodeChannel(streamerId, {
         signal: c.req.raw.signal,
       });
-      return c.json(channel);
+      return c.json(channel, 200);
     } catch (e) {
       if (e instanceof BroadcastOfflineError) {
         return c.json({ code: e.code, message: e.message }, 404);

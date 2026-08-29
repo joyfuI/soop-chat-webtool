@@ -75,8 +75,15 @@ const useStorage = <T>(
         typeof newValue === 'function'
           ? (newValue as (oldValue: T) => T)(oldValue)
           : newValue;
-      storage.setItem(key, JSON.stringify(value));
-      window.dispatchEvent(new CustomEvent(eventType, { detail: { key } })); // 커스텀 이벤트 발생
+      try {
+        storage.setItem(key, JSON.stringify(value));
+        window.dispatchEvent(new CustomEvent(eventType, { detail: { key } })); // 커스텀 이벤트 발생
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+          alert('저장소 공간이 가득 찼습니다!');
+          return;
+        }
+      }
     },
     [storage, eventType, key, parseValue],
   );
