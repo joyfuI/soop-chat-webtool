@@ -12,7 +12,9 @@ import type { SoopChatEventMap } from 'soop-chat';
 import LinkDial from './components/LinkDial';
 import donationCalc from './helper/donationCalc';
 import sanitizeText from './helper/sanitizeText';
+import useChatState from './hooks/useChatState';
 import { useLocalStorage } from './hooks/useStorage';
+import useUnload from './hooks/useUnload';
 import Pinball from './Pinball';
 import Progress from './Progress';
 import Review from './Review';
@@ -37,6 +39,7 @@ const App = () => {
   const [, setReview] = useLocalStorage<StoreType['review']>('review', {});
 
   const { chat } = useSoopChat();
+  const chatState = useChatState();
   const { enqueueSnackbar } = useSnackbar();
 
   // 도네이션 응답과 도네이션 전자녀(일반 텍스트) 응답이 따로 오기 때문에
@@ -133,6 +136,13 @@ const App = () => {
       }),
     [chat, setDonationList, setReview, enqueueSnackbar],
   );
+
+  useUnload((e: BeforeUnloadEvent) => {
+    if (chatState !== 'disconnected') {
+      e.preventDefault();
+      e.returnValue = true;
+    }
+  });
 
   const handleChange = (_e: SyntheticEvent, v: number) => {
     setTab(v);
