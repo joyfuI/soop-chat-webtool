@@ -16,7 +16,10 @@ const defaultTheme = {
     fontFamily:
       '"Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif',
   },
-  components: { MuiStack: { defaultProps: { useFlexGap: true } } },
+  components: {
+    MuiCssBaseline: { styleOverrides: { iframe: { border: 'none' } } },
+    MuiStack: { defaultProps: { useFlexGap: true } },
+  },
 };
 
 const UIProvider = ({ children, themeOptions }: UIProviderProps) => {

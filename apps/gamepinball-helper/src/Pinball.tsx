@@ -78,17 +78,30 @@ const Pinball = () => {
         핀볼 사이트 열기
       </Button>
 
-      <FormLabel label="전투3">
-        <iframe
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowFullScreen
-          height="315"
-          referrerPolicy="strict-origin-when-cross-origin"
-          src="https://www.youtube-nocookie.com/embed/tbMIHckT5No?playlist=tbMIHckT5No&loop=1"
-          title="YouTube video player"
-          width="560"
-        ></iframe>
-      </FormLabel>
+      <Stack direction="row" spacing={2}>
+        <FormLabel label="전투3">
+          <iframe
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+            height="315"
+            referrerPolicy="strict-origin-when-cross-origin"
+            src="https://www.youtube-nocookie.com/embed/tbMIHckT5No?playlist=tbMIHckT5No&loop=1"
+            title="YouTube video player"
+            width="560"
+          ></iframe>
+        </FormLabel>
+        <FormLabel label="블루점프 '도전'">
+          <iframe
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+            height="315"
+            referrerPolicy="strict-origin-when-cross-origin"
+            src="https://www.youtube-nocookie.com/embed/fEczS_A3r3E?playlist=fEczS_A3r3E&loop=1"
+            title="YouTube video player"
+            width="560"
+          ></iframe>
+        </FormLabel>
+      </Stack>
 
       <FormLabel label="리롤 단가">
         <Stack direction="row" spacing={1}>
