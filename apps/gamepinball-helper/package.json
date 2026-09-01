@@ -22,7 +22,8 @@
     "notistack": "^3.0.2",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "soop-chat": "catalog:"
+    "soop-chat": "catalog:",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@babel/core": "^8.0.1",

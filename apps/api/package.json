@@ -18,7 +18,7 @@
     "@hono/zod-validator": "^0.9.0",
     "hono": "catalog:",
     "soop-chat": "catalog:",
-    "zod": "^4.5.2"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@joyfui/typescript-config": "workspace:*",
