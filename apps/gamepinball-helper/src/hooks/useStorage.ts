@@ -56,9 +56,9 @@ const useStorage = <T>(
   }, []);
 
   const parseValue = useCallback(
-    (item: string | null): T => {
+    (value: string | null): T => {
       try {
-        return item !== null ? (JSON.parse(item) as T) : getInitialValue();
+        return value !== null ? (JSON.parse(value) as T) : getInitialValue();
       } catch {
         return getInitialValue();
       }
