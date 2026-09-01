@@ -24,6 +24,7 @@ const Review = () => {
         userId: '',
         message: value,
       },
+      priceList,
       true,
     ); // 단가 계산로직 재활용
     if (calcResult) {
@@ -66,7 +67,7 @@ const Review = () => {
 
   const handleSync = async () => {
     const newReview = donationList.reduce<StoreType['review']>((prev, curr) => {
-      const calcResult = donationCalc(curr); // 단가 계산
+      const calcResult = donationCalc(curr, priceList); // 단가 계산
       if (calcResult) {
         const price = calcResult.price;
         const name = sanitizeText(calcResult.name);

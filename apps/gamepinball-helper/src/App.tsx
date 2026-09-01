@@ -33,6 +33,7 @@ const App = () => {
     new Map<string, (DonationData & { timer: NodeJS.Timeout })[]>(),
   );
   const [tab, setTab] = useStore('tab');
+  const [priceList] = useStore('setup.priceList');
   const [, setDonationList] = useStore('progress.donationList');
   const [, setReview] = useStore('review');
 
@@ -109,7 +110,7 @@ const App = () => {
               username: e.data.senderNickname,
               message: e.data.message,
             };
-            const calcResult = donationCalc(data); // 단가 계산
+            const calcResult = donationCalc(data, priceList); // 단가 계산
             if (calcResult) {
               setDonationList((oldDonationList) =>
                 oldDonationList.concat(data),
@@ -132,7 +133,7 @@ const App = () => {
           }
         }
       }),
-    [chat, setDonationList, setReview, enqueueSnackbar],
+    [chat, priceList, setDonationList, setReview, enqueueSnackbar],
   );
 
   useUnload((e: BeforeUnloadEvent) => {
