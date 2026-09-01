@@ -18,6 +18,7 @@ type DonationEvent =
 const RerollTimerApp = () => {
   const [step, setStep] = useState(0); // 0: 타이머 설정, 1: 타이머 시작, 2: 타이머 정지
   const [isReroll, setIsReroll] = useState(false);
+  const timerEnd = useRef<number>(0);
   const timer = useRef<NodeJS.Timeout>(null);
   const [rerollPrice] = useStore('pinball.rerollPrice');
   const [minute, setMinute] = useStore('pinball.timer.minute');
@@ -29,13 +30,11 @@ const RerollTimerApp = () => {
   const { chat, connectChat } = useSoopChat();
 
   const interval = useCallback(() => {
-    setSS((prevSS) => {
-      if (prevSS > 0) {
-        return prevSS - 1;
-      }
-      setMM((prevMM) => (prevMM > 0 ? prevMM - 1 : 0));
-      return 59;
-    });
+    const remaining = Math.max(0, timerEnd.current - Date.now());
+    const remainingSecond = Math.ceil(remaining / 1000);
+
+    setMM(Math.floor(remainingSecond / 60));
+    setSS(remainingSecond % 60);
   }, []);
 
   const handleClick = useCallback(() => {
@@ -43,7 +42,8 @@ const RerollTimerApp = () => {
       case 0:
         // 타이머 시작
         connectChat(streamerId).catch(console.error);
-        timer.current = setInterval(interval, 1000);
+        timerEnd.current = Date.now() + (minute * 60 + second) * 1000; // 종료 시간
+        timer.current = setInterval(interval, 250);
         setStep(1);
         break;
 
