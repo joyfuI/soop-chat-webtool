@@ -13,14 +13,14 @@ import LinkDial from './components/LinkDial';
 import donationCalc from './helper/donationCalc';
 import sanitizeText from './helper/sanitizeText';
 import useChatState from './hooks/useChatState';
-import { useLocalStorage } from './hooks/useStorage';
+import useStore from './hooks/useStore';
 import useUnload from './hooks/useUnload';
 import Pinball from './Pinball';
 import Progress from './Progress';
 import Review from './Review';
 import Setup from './Setup';
 import { useSoopChat } from './SoopChatContext';
-import type { DonationData, StoreType } from './types';
+import type { DonationData } from './types';
 
 type DonationEvent =
   | SoopChatEventMap['sendBalloon']
@@ -32,11 +32,9 @@ const App = () => {
   const pendingDonation = useRef(
     new Map<string, (DonationData & { timer: NodeJS.Timeout })[]>(),
   );
-  const [tab, setTab] = useLocalStorage<StoreType['tab']>('tab', 0);
-  const [, setDonationList] = useLocalStorage<
-    StoreType['progress.donationList']
-  >('progress.donationList', []);
-  const [, setReview] = useLocalStorage<StoreType['review']>('review', {});
+  const [tab, setTab] = useStore('tab');
+  const [, setDonationList] = useStore('progress.donationList');
+  const [, setReview] = useStore('review');
 
   const { chat } = useSoopChat();
   const chatState = useChatState();

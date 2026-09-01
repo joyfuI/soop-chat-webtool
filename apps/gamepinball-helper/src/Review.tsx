@@ -6,22 +6,13 @@ import Typography from '@mui/material/Typography';
 import PinballList from './components/PinballList';
 import donationCalc from './helper/donationCalc';
 import sanitizeText from './helper/sanitizeText';
-import { useLocalStorage } from './hooks/useStorage';
+import useStore from './hooks/useStore';
 import type { StoreType } from './types';
 
 const Review = () => {
-  const [review, setReview] = useLocalStorage<StoreType['review']>(
-    'review',
-    {},
-  );
-  const [priceList] = useLocalStorage<StoreType['setup.priceList']>(
-    'setup.priceList',
-    [50, 200],
-  );
-  const [donationList] = useLocalStorage<StoreType['progress.donationList']>(
-    'progress.donationList',
-    [],
-  );
+  const [review, setReview] = useStore('review');
+  const [priceList] = useStore('setup.priceList');
+  const [donationList] = useStore('progress.donationList');
 
   const handleAdd = (key: string, value: string) => {
     const calcResult = donationCalc(

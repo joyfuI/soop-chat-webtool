@@ -9,23 +9,14 @@ import { useTheme } from '@mui/material/styles';
 import Typography from '@mui/material/Typography';
 
 import useChatState from './hooks/useChatState';
-import { useLocalStorage } from './hooks/useStorage';
+import useStore from './hooks/useStore';
 import { useSoopChat } from './SoopChatContext';
-import type { StoreType } from './types';
 
 const Progress = () => {
-  const [fontSize, setFontSize] = useLocalStorage<
-    StoreType['progress.fontSize']
-  >('progress.fontSize', 40);
-  const [donationList] = useLocalStorage<StoreType['progress.donationList']>(
-    'progress.donationList',
-    [],
-  );
-  const [streamerId] = useLocalStorage<StoreType['setup.streamerId']>(
-    'setup.streamerId',
-    '',
-  );
-  const [rule] = useLocalStorage<StoreType['setup.rule']>('setup.rule', '');
+  const [fontSize, setFontSize] = useStore('progress.fontSize');
+  const [donationList] = useStore('progress.donationList');
+  const [streamerId] = useStore('setup.streamerId');
+  const [rule] = useStore('setup.rule');
   const theme = useTheme();
 
   const { chat, connectChat } = useSoopChat();

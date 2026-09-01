@@ -1,4 +1,5 @@
 import type { DonationData, StoreType } from '../types';
+import { storeSchema } from '../types';
 
 const REGEXP = /^(.+?)(?:\*(\d+))?$/;
 
@@ -13,12 +14,12 @@ const donationCalc = (data: DonationData, skipPriceCheck: boolean = false) => {
   }
   const amount = parseInt(match[2] || '1', 10);
   const priceList = ((): StoreType['setup.priceList'] => {
+    const initialValue = storeSchema['setup.priceList'].parse(undefined);
     try {
-      return JSON.parse(
-        window.localStorage.getItem('setup.priceList') ?? '[50, 200]',
-      );
+      const item = window.localStorage.getItem('setup.priceList');
+      return item ? JSON.parse(item) : initialValue;
     } catch {
-      return [50, 200];
+      return initialValue;
     }
   })();
   const price = !skipPriceCheck

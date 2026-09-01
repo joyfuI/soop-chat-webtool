@@ -6,19 +6,13 @@ import TextField from '@mui/material/TextField';
 import type { ChangeEvent } from 'react';
 import { useMemo } from 'react';
 
-import { useLocalStorage } from './hooks/useStorage';
-import type { StoreType } from './types';
+import useStore from './hooks/useStore';
 import objectToFeatures from './utils/objectToFeatures';
 
 const Pinball = () => {
-  const [rerollPrice, setRerollPrice] = useLocalStorage<
-    StoreType['pinball.rerollPrice']
-  >('pinball.rerollPrice', 1000);
-  const [review] = useLocalStorage<StoreType['review']>('review', {});
-  const [priceList] = useLocalStorage<StoreType['setup.priceList']>(
-    'setup.priceList',
-    [50, 200],
-  );
+  const [rerollPrice, setRerollPrice] = useStore('pinball.rerollPrice');
+  const [review] = useStore('review');
+  const [priceList] = useStore('setup.priceList');
 
   const value = useMemo(
     () =>

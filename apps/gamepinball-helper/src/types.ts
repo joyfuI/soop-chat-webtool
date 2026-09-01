@@ -1,28 +1,35 @@
-import type { SoopChatEventMap } from 'soop-chat';
+import { z } from 'zod';
 
-export type DonationData = {
-  receivedAt: string;
-  type:
-    | (
-        | SoopChatEventMap['sendBalloon']
-        | SoopChatEventMap['adconEffect']
-      )['type']
-    | 'manual';
-  amount: number;
-  username: string;
-  userId: string;
-  message: string;
+export const storeSchema = {
+  tab: z.number().default(0),
+  'setup.streamerId': z.string().default(''),
+  'setup.rule': z.string().default(''),
+  'setup.priceList': z.array(z.number()).default([50, 200]),
+  'progress.fontSize': z.number().default(40),
+  'progress.donationList': z
+    .array(
+      z.object({
+        receivedAt: z.iso.datetime(),
+        type: z.literal(['sendBalloon', 'adconEffect', 'manual']),
+        amount: z.number(),
+        username: z.string(),
+        userId: z.string(),
+        message: z.string(),
+      }),
+    )
+    .default([]),
+  review: z
+    .record(z.string(), z.record(z.string().trim(), z.number()))
+    .default({}),
+  'pinball.rerollPrice': z.number().default(1000),
+  'pinball.timer.minute': z.number().default(1),
+  'pinball.timer.second': z.number().default(0),
 };
+
+export type StoreKey = keyof typeof storeSchema;
 
 export type StoreType = {
-  tab: number; // 0
-  'setup.streamerId': string; // ''
-  'setup.rule': string; // ''
-  'setup.priceList': number[]; // [50, 200]
-  'progress.fontSize': number; // 40
-  'progress.donationList': DonationData[]; // []
-  review: Record<string, Record<string, number>>; // {}
-  'pinball.rerollPrice': number; // 1000
-  'pinball.timer.minute': number; // 1
-  'pinball.timer.second': number; // 0
+  [K in StoreKey]: z.output<(typeof storeSchema)[K]>;
 };
+
+export type DonationData = StoreType['progress.donationList'][number];

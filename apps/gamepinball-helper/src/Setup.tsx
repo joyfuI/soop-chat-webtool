@@ -6,21 +6,13 @@ import type { ChangeEvent } from 'react';
 
 import PriceList from './components/PriceList';
 import useChatState from './hooks/useChatState';
-import { useLocalStorage } from './hooks/useStorage';
+import useStore from './hooks/useStore';
 import { useSoopChat } from './SoopChatContext';
-import type { StoreType } from './types';
 
 const Setup = () => {
-  const [streamerId, setStreamerId] = useLocalStorage<
-    StoreType['setup.streamerId']
-  >('setup.streamerId', '');
-  const [rule, setRule] = useLocalStorage<StoreType['setup.rule']>(
-    'setup.rule',
-    '',
-  );
-  const [priceList, setPriceList] = useLocalStorage<
-    StoreType['setup.priceList']
-  >('setup.priceList', [50, 200]);
+  const [streamerId, setStreamerId] = useStore('setup.streamerId');
+  const [rule, setRule] = useStore('setup.rule');
+  const [priceList, setPriceList] = useStore('setup.priceList');
 
   const { chat } = useSoopChat();
   const chatState = useChatState();

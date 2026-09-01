@@ -8,9 +8,8 @@ import type { ChangeEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SoopChatEventMap } from 'soop-chat';
 
-import { useLocalStorage } from './hooks/useStorage';
+import useStore from './hooks/useStore';
 import { useSoopChat } from './SoopChatContext';
-import type { StoreType } from './types';
 
 type DonationEvent =
   | SoopChatEventMap['sendBalloon']
@@ -20,22 +19,12 @@ const RerollTimerApp = () => {
   const [step, setStep] = useState(0); // 0: 타이머 설정, 1: 타이머 시작, 2: 타이머 정지
   const [isReroll, setIsReroll] = useState(false);
   const timer = useRef<NodeJS.Timeout>(null);
-  const [rerollPrice] = useLocalStorage<StoreType['pinball.rerollPrice']>(
-    'pinball.rerollPrice',
-    1000,
-  );
-  const [minute, setMinute] = useLocalStorage<
-    StoreType['pinball.timer.minute']
-  >('pinball.timer.minute', 1);
+  const [rerollPrice] = useStore('pinball.rerollPrice');
+  const [minute, setMinute] = useStore('pinball.timer.minute');
   const [mm, setMM] = useState(() => minute);
-  const [second, setSecond] = useLocalStorage<
-    StoreType['pinball.timer.second']
-  >('pinball.timer.second', 0);
+  const [second, setSecond] = useStore('pinball.timer.second');
   const [ss, setSS] = useState(() => second);
-  const [streamerId] = useLocalStorage<StoreType['setup.streamerId']>(
-    'setup.streamerId',
-    '',
-  );
+  const [streamerId] = useStore('setup.streamerId');
 
   const { chat, connectChat } = useSoopChat();
 
