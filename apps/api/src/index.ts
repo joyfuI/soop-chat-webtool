@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { zValidator } from '@hono/zod-validator';
+import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import {
@@ -10,6 +10,8 @@ import {
 } from 'soop-chat';
 import * as z from 'zod';
 
+import { zValidator } from './validator-wrapper';
+
 const app = new Hono();
 
 app.use(
@@ -19,54 +21,63 @@ app.use(
       process.env.NODE_ENV === 'development'
         ? '*'
         : ['https://soop-gamepinball-helper.netlify.app'],
-    allowMethods: ['GET', 'OPTIONS'],
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
   }),
 );
 
-const route = app.get(
-  '/channel',
-  zValidator(
-    'query',
-    z.object({ streamerId: z.string().trim().min(1) }),
-    (result, c) => {
-      if (!result.success) {
-        return c.json(
-          {
-            code: 'INVALID_REQUEST',
-            message: 'Invalid query parameters.',
-            issues: result.error.issues.map((issue) => ({
-              path: issue.path.join('.'),
-              message: issue.message,
-            })),
-          },
-          400,
-        );
+const handleError = (e: unknown, c: Context) => {
+  console.error(e);
+
+  if (e instanceof AuthenticationError) {
+    return c.json({ code: e.code, message: e.message }, 401);
+  }
+
+  return c.json(
+    serializeChannelResolutionError(e),
+    e instanceof RestrictedRoomError ? 403 : 503,
+  );
+};
+
+const route = app
+  .get(
+    '/channel',
+    zValidator('query', z.object({ streamerId: z.string().trim().min(1) })),
+    async (c) => {
+      const { streamerId } = c.req.valid('query');
+      c.header('Cache-Control', 'no-store');
+      try {
+        const channel = await resolveNodeChannel(streamerId, {
+          signal: c.req.raw.signal,
+        });
+        return c.json(channel, 200);
+      } catch (e) {
+        return handleError(e, c);
       }
-      return;
     },
-  ),
-  async (c) => {
-    const { streamerId } = c.req.valid('query');
-    c.header('Cache-Control', 'no-store');
-    try {
-      const channel = await resolveNodeChannel(streamerId, {
-        signal: c.req.raw.signal,
-      });
-      return c.json(channel, 200);
-    } catch (e) {
-      console.error(e);
-
-      if (e instanceof AuthenticationError) {
-        return c.json({ code: e.code, message: e.message }, 401);
+  )
+  .post(
+    '/channel',
+    zValidator(
+      'json',
+      z.object({
+        streamerId: z.string().trim().min(1),
+        roomPassword: z.string().min(1).optional(),
+      }),
+    ),
+    async (c) => {
+      const { streamerId, roomPassword } = c.req.valid('json');
+      c.header('Cache-Control', 'no-store');
+      try {
+        const channel = await resolveNodeChannel(streamerId, {
+          signal: c.req.raw.signal,
+          ...(roomPassword === undefined ? {} : { roomPassword }),
+        });
+        return c.json(channel, 200);
+      } catch (e) {
+        return handleError(e, c);
       }
-
-      return c.json(
-        serializeChannelResolutionError(e),
-        e instanceof RestrictedRoomError ? 403 : 503,
-      );
-    }
-  },
-);
+    },
+  );
 
 export type AppType = typeof route;
 
