@@ -1,10 +1,9 @@
-import UIProvider from '@joyfui/ui/theme/UIProvider';
 import { SnackbarProvider } from 'notistack';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App';
-import PaletteProvider from './PaletteProvider';
+import AppUIProvider from './AppUIProvider';
 import RerollTimerApp from './RerollTimerApp';
 import { SoopChatProvider } from './SoopChatContext';
 
@@ -14,21 +13,19 @@ if (rootElement && !rootElement.innerHTML) {
   const root = createRoot(rootElement);
   root.render(
     <StrictMode>
-      <UIProvider>
-        <PaletteProvider>
-          <SnackbarProvider>
-            {windowType === 'reroll-timer' ? (
-              <SoopChatProvider>
-                <RerollTimerApp />
-              </SoopChatProvider>
-            ) : (
-              <SoopChatProvider>
-                <App />
-              </SoopChatProvider>
-            )}
-          </SnackbarProvider>
-        </PaletteProvider>
-      </UIProvider>
+      <AppUIProvider>
+        <SnackbarProvider>
+          {windowType === 'reroll-timer' ? (
+            <SoopChatProvider>
+              <RerollTimerApp />
+            </SoopChatProvider>
+          ) : (
+            <SoopChatProvider>
+              <App />
+            </SoopChatProvider>
+          )}
+        </SnackbarProvider>
+      </AppUIProvider>
     </StrictMode>,
   );
 }
