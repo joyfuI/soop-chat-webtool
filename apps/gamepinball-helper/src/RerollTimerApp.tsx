@@ -6,14 +6,10 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import type { ChangeEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SoopChatEventMap } from 'soop-chat';
 
 import useStore from './hooks/useStore';
 import { useSoopChat } from './SoopChatContext';
-
-type DonationEvent =
-  | SoopChatEventMap['sendBalloon']
-  | SoopChatEventMap['adconEffect'];
+import type { DonationEvent } from './types';
 
 const RerollTimerApp = () => {
   const [step, setStep] = useState(0); // 0: 타이머 설정, 1: 타이머 시작, 2: 타이머 정지

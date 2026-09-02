@@ -7,7 +7,6 @@ import Container from '@mui/material/Container';
 import { useSnackbar } from 'notistack';
 import type { SyntheticEvent } from 'react';
 import { useEffect, useRef } from 'react';
-import type { SoopChatEventMap } from 'soop-chat';
 
 import LinkDial from './components/LinkDial';
 import donationCalc from './helper/donationCalc';
@@ -20,11 +19,7 @@ import Progress from './Progress';
 import Review from './Review';
 import Setup from './Setup';
 import { useSoopChat } from './SoopChatContext';
-import type { DonationData } from './types';
-
-type DonationEvent =
-  | SoopChatEventMap['sendBalloon']
-  | SoopChatEventMap['adconEffect'];
+import type { DonationData, DonationEvent } from './types';
 
 const REGEXP = /\(\d+\)$/;
 

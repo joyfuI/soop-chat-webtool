@@ -1,4 +1,9 @@
+import type { SoopChatEventMap } from 'soop-chat';
 import { z } from 'zod';
+
+export type DonationEvent =
+  | SoopChatEventMap['sendBalloon']
+  | SoopChatEventMap['adconEffect'];
 
 export const storeSchema = {
   tab: z.number().default(0),
