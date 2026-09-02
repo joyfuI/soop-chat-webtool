@@ -7,7 +7,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const importKey = async (secret: string): Promise<CryptoKey> => {
-  let raw: Uint8Array;
+  let raw: Uint8Array<ArrayBuffer>;
   try {
     raw = Uint8Array.fromBase64(secret.trim());
   } catch {

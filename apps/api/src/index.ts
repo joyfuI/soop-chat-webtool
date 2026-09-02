@@ -1,4 +1,5 @@
 /// <reference types="node" />
+/// <reference types="../worker-configuration.d.ts" />
 import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
