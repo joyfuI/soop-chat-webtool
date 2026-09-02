@@ -3,7 +3,8 @@
   "name": "soop-chat-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-21",
-  "preview_urls": false
+  "preview_urls": false,
+  "secrets": { "required": ["AUTH_COOKIE_KEY"] }
   // "compatibility_flags": [
   //   "nodejs_compat"
   // ],
