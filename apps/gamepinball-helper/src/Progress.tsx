@@ -27,6 +27,10 @@ const Progress = () => {
       await connectChat(streamerId);
     } catch (e) {
       console.error(e);
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        // 사용자 취소
+        return;
+      }
       alert('채팅 연결 실패!');
     }
   };
@@ -53,10 +57,9 @@ const Progress = () => {
           value={fontSize}
           valueLabelDisplay="auto"
         />
-        {chatState !== 'connected' ? (
+        {chatState === 'disconnected' ? (
           <Fab
             color="primary"
-            disabled={chatState === 'connecting'}
             onClick={playSoopChat}
             sx={{ minWidth: 'fit-content' }}
             variant="extended"

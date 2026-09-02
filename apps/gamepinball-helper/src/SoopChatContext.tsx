@@ -1,6 +1,6 @@
 import type { PropsWithChildren } from 'react';
 import { createContext, useCallback, useContext, useState } from 'react';
-import { SoopChat } from 'soop-chat/browser';
+import { deserializeChannelResolutionError, SoopChat } from 'soop-chat/browser';
 
 import api from './lib/api';
 
@@ -24,7 +24,7 @@ export const SoopChatProvider = ({ children }: PropsWithChildren) => {
         );
         if (!response.ok) {
           const data = await response.json();
-          throw new Error(data.message);
+          throw deserializeChannelResolutionError(data, { streamerId });
         }
         return response.json();
       },

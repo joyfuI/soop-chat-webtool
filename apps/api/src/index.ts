@@ -1,13 +1,12 @@
 /// <reference types="node" />
-
 import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import {
-  BroadcastOfflineError,
-  ChannelResolutionError,
+  AuthenticationError,
   RestrictedRoomError,
   resolveNodeChannel,
+  serializeChannelResolutionError,
 } from 'soop-chat';
 import * as z from 'zod';
 
@@ -55,25 +54,15 @@ const route = app.get(
       });
       return c.json(channel, 200);
     } catch (e) {
-      if (e instanceof BroadcastOfflineError) {
-        return c.json({ code: e.code, message: e.message }, 404);
-      }
-
-      if (e instanceof RestrictedRoomError) {
-        return c.json(
-          { code: e.code, message: e.message, reason: e.reason },
-          403,
-        );
-      }
-
-      if (e instanceof ChannelResolutionError) {
-        return c.json({ code: e.code, message: e.message }, 502);
-      }
-
       console.error(e);
+
+      if (e instanceof AuthenticationError) {
+        return c.json({ code: e.code, message: e.message }, 401);
+      }
+
       return c.json(
-        { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' },
-        500,
+        serializeChannelResolutionError(e),
+        e instanceof RestrictedRoomError ? 403 : 503,
       );
     }
   },
