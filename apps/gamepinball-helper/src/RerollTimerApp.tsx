@@ -76,19 +76,11 @@ const RerollTimerApp = () => {
     };
 
     const sendBalloonOff = chat?.on('sendBalloon', (e) => {
-      console.log(
-        'sendBalloon',
-        new Date(e.receivedAt).toLocaleString(),
-        e.data,
-      );
+      console.log(e.type, new Date(e.receivedAt).toLocaleString(), e.data);
       handleDonation(e);
     });
     const adconEffectOff = chat?.on('adconEffect', (e) => {
-      console.log(
-        'adconEffect',
-        new Date(e.receivedAt).toLocaleString(),
-        e.data,
-      );
+      console.log(e.type, new Date(e.receivedAt).toLocaleString(), e.data);
       handleDonation(e);
     });
     return () => {

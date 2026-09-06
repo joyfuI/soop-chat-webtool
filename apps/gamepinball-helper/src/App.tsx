@@ -63,19 +63,11 @@ const App = () => {
     };
 
     const sendBalloonOff = chat?.on('sendBalloon', (e) => {
-      console.log(
-        'sendBalloon',
-        new Date(e.receivedAt).toLocaleString(),
-        e.data,
-      );
+      console.log(e.type, new Date(e.receivedAt).toLocaleString(), e.data);
       handleDonation(e);
     });
     const adconEffectOff = chat?.on('adconEffect', (e) => {
-      console.log(
-        'adconEffect',
-        new Date(e.receivedAt).toLocaleString(),
-        e.data,
-      );
+      console.log(e.type, new Date(e.receivedAt).toLocaleString(), e.data);
       handleDonation(e);
     });
     return () => {
@@ -86,11 +78,7 @@ const App = () => {
   useEffect(
     () =>
       chat?.on('chatMessage', (e) => {
-        console.log(
-          'chatMessage',
-          new Date(e.receivedAt).toLocaleString(),
-          e.data,
-        );
+        console.log(e.type, new Date(e.receivedAt).toLocaleString(), e.data);
         const userId = e.data.senderId.replace(REGEXP, '');
         const queue = pendingDonation.current.get(userId) ?? [];
         if (queue.length > 0) {
