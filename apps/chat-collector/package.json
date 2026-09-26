@@ -1,0 +1,26 @@
+{
+  "name": "chat-collector",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch src/index.ts",
+    "start": "node --env-file-if-exists=.env src/index.ts",
+    "test": "node --test test/collector.test.ts",
+    "format": "biome format --write",
+    "lint": "biome lint --write",
+    "check": "biome check --write",
+    "reporter": "biome check --reporter=summary",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=24.10.0" },
+  "dependencies": {
+    "fastify": "^5.12.5",
+    "fastify-plugin": "^6.0.0",
+    "soop-chat": "catalog:"
+  },
+  "devDependencies": {
+    "@joyfui/typescript-config": "workspace:*",
+    "@types/node": "^26.6.2"
+  }
+}

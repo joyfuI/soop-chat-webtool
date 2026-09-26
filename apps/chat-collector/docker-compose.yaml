@@ -1,0 +1,41 @@
+services:
+  chat-collector:
+    image: node:24-bookworm-slim
+    working_dir: /workspace
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    env_file:
+      - ./.env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+
+    volumes:
+      - ../../package.json:/workspace/package.json:ro
+      - ../../pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro
+      - ../../pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
+      - ../../packages/typescript-config/package.json:/workspace/packages/typescript-config/package.json:ro
+      - ./package.json:/workspace/apps/chat-collector/package.json:ro
+      - ./src:/workspace/apps/chat-collector/src:ro
+      # Keep Linux dependencies separate from the host's node_modules.
+      - collector-workspace-dependencies:/workspace/node_modules
+      - collector-dependencies:/workspace/apps/chat-collector/node_modules
+      - ./data:/workspace/apps/chat-collector/data
+
+    command:
+      - sh
+      - -ec
+      - |
+        npm install --global pnpm
+        pnpm --filter chat-collector install --prod --frozen-lockfile
+        cd apps/chat-collector
+        exec node src/index.ts
+
+volumes:
+  collector-workspace-dependencies:
+  collector-dependencies:
