@@ -1,4 +1,5 @@
 .turbo
 node_modules
-data/
+data/*
+!data/.keep
 .env

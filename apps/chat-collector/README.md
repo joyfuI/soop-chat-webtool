@@ -52,7 +52,7 @@ docker compose down
 
 소스는 읽기 전용으로 마운트하고 Linux용 의존성은 별도 Docker 볼륨에 저장합니다. 호스트의 `node_modules`와 공유하지 않습니다. 컨테이너를 시작할 때 설치 명령을 실행하므로 npm 레지스트리에 접근할 수 있어야 합니다. 소스 변경 후에는 `docker compose restart chat-collector`로 적용합니다.
 
-DB는 로컬 `apps/chat-collector/data/`를 컨테이너의 앱 `data/`에 직접 연결해 저장합니다. 기존 로컬 DB도 그대로 사용하며, 폴더가 없으면 Docker가 생성합니다. `docker compose down -v`도 로컬 DB를 삭제하지 않습니다. 암호화 키는 계속 같은 값을 사용해야 합니다.
+DB는 로컬 `apps/chat-collector/data/`를 컨테이너의 앱 `data/`에 직접 연결해 저장합니다.
 
 API는 호스트의 3000번 포트로 공개합니다. Docker에서는 `HOST=0.0.0.0`, `PORT=3000`을 사용하며 호스트 포트를 바꾸려면 Compose의 `ports` 왼쪽 값을 수정합니다. 환경 변수나 Compose 설정을 변경했으면 `docker compose up -d --force-recreate`로 적용합니다.
 
