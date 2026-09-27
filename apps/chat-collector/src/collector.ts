@@ -235,6 +235,18 @@ export class Collector {
 
   private attempt(runner: Runner) {
     if (!runner.active || runner.fatal || runner.attempt) return;
+    try {
+      const streamer = this.store.getStreamer(runner.streamer.streamer_id);
+      if (streamer.room_password !== runner.streamer.room_password) {
+        void this.restart(streamer.streamer_id).catch(() =>
+          this.failStorage(runner),
+        );
+        return;
+      }
+    } catch {
+      this.failStorage(runner);
+      return;
+    }
     runner.state = 'connecting';
     runner.attempt = runner.chat
       .connect()
@@ -328,18 +340,12 @@ export class Collector {
     }
   }
 
-  async reloadCredentials() {
+  reloadCredentials() {
     const credentials = this.store.getCredentials();
     this.authController.abort();
     this.authController = new AbortController();
     this.authentication = undefined;
     this.credentials = credentials;
-    await Promise.all(
-      this.store
-        .listStreamers()
-        .filter((s) => s.enabled)
-        .map((s) => this.restart(s.streamer_id)),
-    );
   }
 
   async shutdown() {

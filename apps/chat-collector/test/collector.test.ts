@@ -123,7 +123,7 @@ class FakeChat extends SoopChat {
 
 async function fixture(
   t: TestContext,
-  resolver: ChannelResolver = async () => channel(),
+  resolver: ChannelResolver | null = async () => channel(),
   corsOrigins: string[] = [],
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), 'collector-test-'));
@@ -133,7 +133,7 @@ async function fixture(
     secretKey: key,
     dataDir,
     corsOrigins,
-    resolveChannel: resolver,
+    ...(resolver ? { resolveChannel: resolver } : {}),
     createChat: (opts: NodeSoopChatOptions) => {
       const chat = new FakeChat(opts);
       chats.push(chat);
@@ -530,14 +530,16 @@ test('retention API validates days, preserves partial updates and registration s
   await flush();
   assert.equal(f.store.getStreamer('user123').retention_days, 30);
   assert.equal(f.store.getStreamer('user123').room_password, null);
-  assert.equal(f.chats.length, before + 1);
+  assert.equal(f.chats.length, before);
   await f.call('PATCH', '/api/streamers/user123', {
     roomPassword: 'changed',
     retentionDays: 7,
   });
   await flush();
   assert.equal(f.store.getStreamer('user123').retention_days, 7);
-  assert.equal(f.chats.at(-1)?.options.roomPassword, 'changed');
+  assert.equal(f.chats.length, before);
+  assert.equal(chat?.disconnections, 0);
+  assert.equal(chat?.options.roomPassword, 'room-secret');
   assert.equal(
     (await f.call('POST', '/api/collection/stop/user123')).json().retentionDays,
     7,
@@ -712,9 +714,13 @@ test('retention protects resolving, collecting, retrying and asynchronous restar
         };
       }),
   );
-  const pending = f.call('PATCH', '/api/streamers/user123', {
+  const changed = await f.call('PATCH', '/api/streamers/user123', {
     roomPassword: 'changed',
   });
+  assert.equal(changed.statusCode, 200);
+  assert.equal(chat.disconnections, 0);
+  chat.transition('closed');
+  t.mock.timers.tick(10_000);
   await flush();
   assert.equal(f.collector.runners.has('user123'), false);
   assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
@@ -727,7 +733,6 @@ test('retention protects resolving, collecting, retrying and asynchronous restar
   assert.equal(f.store.findBroadcast('1001').event_count, 3);
   assert.ok(releaseDisconnect);
   releaseDisconnect();
-  assert.equal((await pending).statusCode, 200);
   await flush();
   assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
   await f.call('POST', '/api/collection/stop/user123');
@@ -967,6 +972,195 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   t.mock.timers.reset();
 });
 
+test('room password changes and clearing preserve collection and apply on automatic retry or a later start', async (t) => {
+  const passwords: (string | undefined)[] = [];
+  const f = await fixture(t, async (_id, context) => {
+    passwords.push(context.roomPassword);
+    return channel();
+  });
+  await f.app.ready();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/streamers', {
+    streamerId: 'user123',
+    roomPassword: 'original',
+  });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  for (const roomPassword of ['changed', null, 'restored']) {
+    const chat = f.chats.at(-1);
+    assert.ok(chat);
+    const count = f.store.findBroadcast('1001').event_count;
+    const response = await f.call('PATCH', '/api/streamers/user123', {
+      roomPassword,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().state, 'collecting');
+    assert.equal(response.json().roomPasswordConfigured, roomPassword !== null);
+    assert.equal(f.chats.at(-1), chat);
+    assert.equal(chat.currentState, 'connected');
+    assert.equal(chat.disconnections, 0);
+    assert.equal(chat.connections, 1);
+    chat.emit('event', event());
+    assert.equal(f.store.findBroadcast('1001').event_count, count + 1);
+    assert.equal(f.store.findBroadcast('1001').ended_at, null);
+    chat.transition('closed');
+    t.mock.timers.tick(9999);
+    await flush();
+    assert.equal(f.chats.at(-1), chat);
+    t.mock.timers.tick(1);
+    await flush();
+    const reconnected = f.chats.at(-1);
+    assert.ok(reconnected);
+    assert.notEqual(reconnected, chat);
+    assert.equal(reconnected.options.roomPassword, roomPassword ?? undefined);
+    assert.equal(reconnected.currentState, 'connected');
+    assert.equal(f.store.findBroadcast('1001').event_count, count + 2);
+    assert.equal(f.store.findBroadcast('1001').ended_at, null);
+  }
+  const waiting = f.chats.at(-1);
+  assert.ok(waiting);
+  waiting.transition('closed');
+  await f.call('PATCH', '/api/streamers/user123', {
+    roomPassword: 'intermediate',
+  });
+  await f.call('PATCH', '/api/streamers/user123', { roomPassword: 'latest' });
+  assert.equal(f.chats.at(-1), waiting);
+  assert.equal(waiting.disconnections, 0);
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(f.chats.at(-1)?.options.roomPassword, 'latest');
+  await f.call('POST', '/api/collection/stop/user123');
+  const before = f.chats.length;
+  await f.call('PATCH', '/api/streamers/user123', {
+    roomPassword: 'next-start',
+  });
+  assert.equal(f.chats.length, before);
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  assert.equal(f.chats.at(-1)?.options.roomPassword, 'next-start');
+  assert.deepEqual(passwords, [
+    'original',
+    'changed',
+    undefined,
+    'restored',
+    'latest',
+    'next-start',
+  ]);
+});
+
+test('room password updates do not cancel an in-flight connection and are used after it disconnects', async (t) => {
+  const passwords: (string | undefined)[] = [];
+  let finish: ((value: ReturnType<typeof channel>) => void) | undefined;
+  const f = await fixture(t, async (_id, context) => {
+    passwords.push(context.roomPassword);
+    if (passwords.length > 1) return channel();
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  });
+  await f.app.ready();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  const changed = await f.call('PATCH', '/api/streamers/user123', {
+    roomPassword: 'new-password',
+  });
+  assert.equal(changed.json().state, 'connecting');
+  assert.equal(chat.controller.signal.aborted, false);
+  assert.equal(chat.disconnections, 0);
+  assert.equal(f.chats.length, 1);
+  assert.ok(finish);
+  finish(channel());
+  await flush();
+  assert.equal(chat.currentState, 'connected');
+  chat.transition('closed');
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.deepEqual(passwords, [undefined, 'new-password']);
+  assert.equal(f.chats.at(-1)?.options.roomPassword, 'new-password');
+});
+
+test('account changes and clearing preserve collection and apply credentials on the next connection', async (t) => {
+  const logins: { username: string | null; password: string | null }[] = [];
+  const cookies: (string | null)[] = [];
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (input: string, init: RequestInit) => {
+      if (input.startsWith('https://login.sooplive.com/')) {
+        const body = new URLSearchParams(String(init.body));
+        const username = body.get('szUid');
+        logins.push({ username, password: body.get('szPassword') });
+        return Response.json(
+          { RESULT: 1 },
+          { headers: { 'set-cookie': `AuthTicket=${username}; Path=/` } },
+        );
+      }
+      assert.ok(input.startsWith('https://live.sooplive.com/'));
+      cookies.push(new Headers(init.headers).get('cookie'));
+      return Response.json({
+        CHANNEL: {
+          RESULT: 1,
+          BNO: '1001',
+          CHATNO: '1',
+          CHDOMAIN: 'localhost',
+          CHPT: 8000,
+          TK: 'ticket',
+          FTK: 'fan-ticket',
+        },
+      });
+    },
+  );
+  const f = await fixture(t, null);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('PATCH', '/api/settings', {
+    username: 'first-account',
+    password: 'first-secret',
+  });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  for (const credentials of [
+    { username: 'second-account', password: 'second-secret' },
+    { username: null, password: null },
+  ]) {
+    const connections = chat.connections;
+    const response = await f.call('PATCH', '/api/settings', credentials);
+    assert.equal(response.statusCode, 200);
+    await flush();
+    assert.equal(f.chats.length, 1);
+    assert.equal(chat.connections, connections);
+    assert.equal(chat.disconnections, 0);
+    assert.equal(chat.currentState, 'connected');
+    assert.equal(
+      f.collector.status(f.store.getStreamer('user123')).state,
+      'collecting',
+    );
+    const count = f.store.findBroadcast('1001').event_count;
+    chat.emit('event', event());
+    assert.equal(f.store.findBroadcast('1001').event_count, count + 1);
+    chat.transition('closed');
+    t.mock.timers.tick(10_000);
+    await flush();
+    assert.equal(chat.connections, connections + 1);
+    assert.equal(chat.currentState, 'connected');
+  }
+  assert.deepEqual(logins, [
+    { username: 'first-account', password: 'first-secret' },
+    { username: 'second-account', password: 'second-secret' },
+  ]);
+  assert.deepEqual(cookies, [
+    'AuthTicket=first-account',
+    'AuthTicket=second-account',
+    null,
+  ]);
+});
+
 test('start/stop idempotence, active deletion, reconnect configuration and automatic resume', async (t) => {
   let broadcastNo = '1001';
   const f = await fixture(t, async () => channel(broadcastNo));
@@ -985,25 +1179,34 @@ test('start/stop idempotence, active deletion, reconnect configuration and autom
     409,
   );
   const firstChat = f.chats[0];
+  assert.ok(firstChat);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   broadcastNo = '1002';
   await f.call('PATCH', '/api/streamers/user123', {
     roomPassword: 'new-room-password',
   });
   await flush();
-  assert.ok(firstChat?.controller.signal.aborted);
-  assert.ok(f.store.findBroadcast('1001').ended_at);
+  assert.equal(firstChat?.controller.signal.aborted, false);
+  assert.equal(firstChat?.disconnections, 0);
+  assert.equal(f.store.findBroadcast('1001').ended_at, null);
   assert.equal(
     f.collector.status(f.store.getStreamer('user123')).broadcastNo,
-    '1002',
+    '1001',
   );
-  assert.equal(f.chats.at(-1)?.options.roomPassword, 'new-room-password');
   const before = f.chats.length;
   await f.call('PATCH', '/api/settings', {
     username: 'user123',
     password: 'secret',
   });
   await flush();
+  assert.equal(f.chats.length, before);
+  firstChat.transition('closed');
+  t.mock.timers.tick(10_000);
+  await flush();
   assert.equal(f.chats.length, before + 1);
+  assert.ok(firstChat.controller.signal.aborted);
+  assert.ok(f.store.findBroadcast('1001').ended_at);
+  assert.equal(f.chats.at(-1)?.options.roomPassword, 'new-room-password');
   await f.app.close();
   assert.equal(f.store.settings.isOpen, false);
   const resumed = await f.open();
@@ -1016,6 +1219,12 @@ test('start/stop idempotence, active deletion, reconnect configuration and autom
   assert.equal(
     resumed.collector.status(resumed.store.getStreamer('other123')).state,
     'stopped',
+  );
+  assert.equal(f.chats.at(-1)?.options.roomPassword, 'new-room-password');
+  assert.ok(resumed.store.findBroadcast('1001').ended_at);
+  assert.equal(
+    resumed.collector.status(resumed.store.getStreamer('user123')).broadcastNo,
+    '1002',
   );
   assert.equal(resumed.store.getStreamer('user123').enabled, 1);
   await resumed.app.inject({

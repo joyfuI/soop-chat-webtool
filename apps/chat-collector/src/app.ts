@@ -241,8 +241,6 @@ export async function buildApp(options: {
       async (request) => {
         const streamer = store.getStreamer(request.params.streamerId);
         store.updateStreamer(streamer.streamer_id, request.body);
-        if (request.body.roomPassword !== undefined)
-          await collector.restart(streamer.streamer_id);
         return collector.status(store.getStreamer(streamer.streamer_id));
       },
     );
@@ -308,7 +306,7 @@ export async function buildApp(options: {
           request.body.username?.trim() ?? null,
           request.body.password,
         );
-        await collector.reloadCredentials();
+        collector.reloadCredentials();
         return store.getSettings();
       },
     );
