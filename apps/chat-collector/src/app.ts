@@ -61,13 +61,7 @@ export async function buildApp(options: {
   mkdirSync(options.dataDir, { recursive: true });
   const app = Fastify({
     logger: options.logger
-      ? {
-          redact: [
-            'req.headers.authorization',
-            'req.body.password',
-            'req.body.roomPassword',
-          ],
-        }
+      ? { redact: ['req.headers.authorization', 'req.body.password'] }
       : false,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });

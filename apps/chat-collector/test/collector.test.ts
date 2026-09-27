@@ -327,9 +327,17 @@ test('API authentication, ID boundaries, registration, password encryption, SQLi
   );
   assert.equal(f.store.getStreamer('abc123').room_password, 'room-secret');
   assert.equal(f.store.getDatabase('abc123'), f.store.getDatabase('Abc123'));
-  assert.ok(
-    !(await f.call('GET', '/api/streamers')).body.includes('room-secret'),
+  assert.equal(
+    (await f.call('GET', '/api/streamers'))
+      .json()
+      .find(
+        (streamer: { streamerId: string }) => streamer.streamerId === 'Abc123',
+      ).roomPassword,
+    'room-secret',
   );
+  const unauthenticated = await f.app.inject('/api/streamers');
+  assert.equal(unauthenticated.statusCode, 401);
+  assert.ok(!unauthenticated.body.includes('room-secret'));
   assert.equal(
     (await f.call('PATCH', '/api/streamers/Abc123', { roomPassword: null }))
       .statusCode,
@@ -454,6 +462,7 @@ test('retention API validates days, preserves partial updates and registration s
     roomPassword: 'room-secret',
   });
   assert.equal(created.statusCode, 201);
+  assert.equal(created.json().roomPassword, 'room-secret');
   assert.equal(created.json().retentionDays, 0);
   assert.equal(f.store.getStreamer('user123').retention_days, 0);
   for (const retentionDays of [
@@ -995,7 +1004,8 @@ test('room password changes and clearing preserve collection and apply on automa
     });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().state, 'collecting');
-    assert.equal(response.json().roomPasswordConfigured, roomPassword !== null);
+    assert.ok(!Object.hasOwn(response.json(), 'roomPasswordConfigured'));
+    assert.equal(response.json().roomPassword, roomPassword);
     assert.equal(f.chats.at(-1), chat);
     assert.equal(chat.currentState, 'connected');
     assert.equal(chat.disconnections, 0);

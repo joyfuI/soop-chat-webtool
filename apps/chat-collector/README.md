@@ -117,7 +117,7 @@ Node의 내장 TypeScript 실행은 타입을 제거하고 실행하며 타입 �
 | GET | `/api/broadcasts/:broadcastNo/download?format=csv` | 특정 방송의 CSV |
 | POST | `/api/query/:streamerId` | `{ "sql": "SELECT ..." }` |
 
-시작·중지는 반복 호출해도 안전합니다. 대상 목록의 `state`는 `stopped`, `waiting`, `connecting`, `collecting`, `error`이며, `enabled`는 저장된 시작 여부입니다. 목록·등록·수정·수집 제어 응답에 `retentionDays`를 포함합니다. 비밀번호는 반환하지 않습니다.
+시작·중지는 반복 호출해도 안전합니다. 대상 목록의 `state`는 `stopped`, `waiting`, `connecting`, `collecting`, `error`이며, `enabled`는 저장된 시작 여부입니다. 목록·등록·수정·수집 제어 응답에 `retentionDays`와 평문 방 비밀번호 `roomPassword`를 포함합니다. 방 비밀번호가 없으면 `null`입니다. SOOP 계정 비밀번호는 반환하지 않습니다.
 
 방송 목록은 **페이지네이션 없이 배열 전체**를 반환하며 `first_collected_at` 내림차순, 스트리머 ID·방송 번호 오름차순으로 정렬합니다. DB 컬럼에 `collecting`을 추가해 반환합니다.
 

@@ -97,7 +97,7 @@ export class Collector {
       state: runner?.state ?? 'stopped',
       broadcastNo: runner?.broadcastNo ?? null,
       lastError: runner?.lastError ?? null,
-      roomPasswordConfigured: streamer.room_password !== null,
+      roomPassword: streamer.room_password,
       retentionDays: streamer.retention_days,
     };
   }
