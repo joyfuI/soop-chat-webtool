@@ -19,6 +19,7 @@ node --input-type=module -e "import { randomBytes } from 'node:crypto'; console.
 | --- | --- |
 | `COLLECTOR_API_KEY` | 모든 API의 Bearer 인증 키, 필수 |
 | `COLLECTOR_SECRET_KEY` | SOOP 계정 비밀번호 암호화용 Base64 32바이트 키, 필수 |
+| `COLLECTOR_CORS_ORIGINS` | 브라우저 직접 호출을 허용할 출처 목록. 쉼표로 구분하며 미설정 시 CORS 비활성화 |
 | `HOST` | 기본 `0.0.0.0` |
 | `PORT` | 기본 `3000` |
 
@@ -94,6 +95,8 @@ Node의 내장 TypeScript 실행은 타입을 제거하고 실행하며 타입 �
 ## API
 
 모든 요청에 `Authorization: Bearer <COLLECTOR_API_KEY>`를 지정합니다. JSON 요청은 `Content-Type: application/json`을 사용합니다.
+
+어드민 웹페이지에서 직접 연결하려면 `COLLECTOR_CORS_ORIGINS=http://localhost:5173,http://localhost:4173`처럼 정확한 출처를 지정하고 서버를 재시작합니다. 출처에는 경로나 마지막 `/`를 넣지 않습니다. 와일드카드는 허용하지 않습니다. CORS OPTIONS 사전 요청은 인증 없이 처리하지만 실제 API 요청에는 Bearer 인증이 필요합니다. 허용한 출처에서 오류 응답도 읽을 수 있습니다. 출처 허용은 인증을 대체하지 않습니다.
 
 | 메서드 | 경로 | 요청·동작 |
 | --- | --- | --- |

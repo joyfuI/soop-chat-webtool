@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
+import cors from '@fastify/cors';
 import Fastify, { type FastifyError } from 'fastify';
 import type { ChannelResolver } from 'soop-chat';
 
@@ -47,6 +48,7 @@ export async function buildApp(options: {
   secretKey: Buffer;
   dataDir: string;
   logger?: boolean;
+  corsOrigins?: string[];
   createChat?: ChatFactory;
   resolveChannel?: ChannelResolver;
 }) {
@@ -70,6 +72,21 @@ export async function buildApp(options: {
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   try {
+    if (options.corsOrigins?.length) {
+      for (const origin of options.corsOrigins) {
+        const url = new URL(origin);
+        if (
+          !['http:', 'https:'].includes(url.protocol) ||
+          url.origin !== origin
+        )
+          throw new Error('CORS 출처는 경로 없는 HTTP(S) 출처여야 합니다.');
+      }
+      await app.register(cors, {
+        origin: options.corsOrigins,
+        methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+        allowedHeaders: ['Authorization', 'Content-Type'],
+      });
+    }
     await app.register(sqlitePlugin, {
       path: join(options.dataDir, '_settings.db'),
       wal: false,

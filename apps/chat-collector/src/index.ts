@@ -22,6 +22,10 @@ const { app } = await buildApp({
   secretKey,
   dataDir: join(root, 'data'),
   logger: true,
+  corsOrigins: (process.env.COLLECTOR_CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

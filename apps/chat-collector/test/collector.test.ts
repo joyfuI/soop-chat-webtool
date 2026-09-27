@@ -124,6 +124,7 @@ class FakeChat extends SoopChat {
 async function fixture(
   t: TestContext,
   resolver: ChannelResolver = async () => channel(),
+  corsOrigins: string[] = [],
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), 'collector-test-'));
   const chats: FakeChat[] = [];
@@ -131,6 +132,7 @@ async function fixture(
     apiKey: 'test-api-key',
     secretKey: key,
     dataDir,
+    corsOrigins,
     resolveChannel: resolver,
     createChat: (opts: NodeSoopChatOptions) => {
       const chat = new FakeChat(opts);
@@ -178,6 +180,92 @@ async function fixture(
 async function flush(turns = 2) {
   for (let turn = 0; turn < turns; turn++) await setImmediate();
 }
+
+test('CORS preflight, allowed origins and API authentication', async (t) => {
+  const origin = 'http://localhost:5173';
+  const f = await fixture(t, undefined, [origin, 'http://localhost:4173']);
+  for (const method of ['GET', 'POST', 'PATCH', 'DELETE']) {
+    const response = await f.app.inject({
+      method: 'OPTIONS',
+      url: '/api/streamers',
+      headers: {
+        origin,
+        'access-control-request-method': method,
+        'access-control-request-headers': 'authorization,content-type',
+      },
+    });
+    assert.equal(response.statusCode, 204);
+    assert.equal(response.headers['access-control-allow-origin'], origin);
+    assert.ok(
+      String(response.headers['access-control-allow-methods']).includes(method),
+    );
+    assert.match(
+      String(response.headers['access-control-allow-headers']),
+      /Authorization/i,
+    );
+    assert.match(
+      String(response.headers['access-control-allow-headers']),
+      /Content-Type/i,
+    );
+  }
+  const unauthorized = await f.app.inject({
+    url: '/api/settings',
+    headers: { origin },
+  });
+  assert.equal(unauthorized.statusCode, 401);
+  assert.equal(unauthorized.headers['access-control-allow-origin'], origin);
+  const authorized = await f.app.inject({
+    url: '/api/settings',
+    headers: { ...headers, origin },
+  });
+  assert.equal(authorized.statusCode, 200);
+  assert.equal(authorized.headers['access-control-allow-origin'], origin);
+  const deniedOrigin = 'http://untrusted.example';
+  for (const method of ['GET', 'OPTIONS'] as const) {
+    const response = await f.app.inject({
+      method,
+      url: '/api/settings',
+      headers: {
+        ...headers,
+        origin: deniedOrigin,
+        'access-control-request-method': 'GET',
+      },
+    });
+    assert.equal(response.headers['access-control-allow-origin'], undefined);
+  }
+  const disabled = await fixture(t);
+  const withoutCors = await disabled.app.inject({
+    url: '/api/settings',
+    headers: { ...headers, origin },
+  });
+  assert.equal(withoutCors.statusCode, 200);
+  assert.equal(withoutCors.headers['access-control-allow-origin'], undefined);
+  assert.equal(
+    (
+      await disabled.app.inject({
+        method: 'OPTIONS',
+        url: '/api/settings',
+        headers: { origin, 'access-control-request-method': 'GET' },
+      })
+    ).statusCode,
+    401,
+  );
+  for (const invalid of [
+    '*',
+    'http://localhost:5173/',
+    'http://localhost:5173/path',
+    'file:///tmp',
+  ]) {
+    await assert.rejects(
+      buildApp({
+        apiKey: 'test-api-key',
+        secretKey: key,
+        dataDir: f.dataDir,
+        corsOrigins: [invalid],
+      }),
+    );
+  }
+});
 
 test('API authentication, ID boundaries, registration, password encryption, SQLite settings', async (t) => {
   const f = await fixture(t);
