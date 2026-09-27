@@ -16,6 +16,34 @@ import type { Store, Streamer } from './storage.ts';
 export type ChatFactory = (
   options: NodeSoopChatOptions,
 ) => Pick<SoopChat, 'connect' | 'disconnect' | 'on' | 'state'>;
+export type BroadcastLookup = (
+  id: string,
+  signal: AbortSignal,
+) => Promise<string | null>;
+
+const lookupBroadcast: BroadcastLookup = async (id, signal) => {
+  const response = await fetch(
+    `https://api-channel.sooplive.com/v1.1/channel/${encodeURIComponent(id)}/home/section/broad`,
+    { signal, headers: { accept: 'application/json' } },
+  );
+  if (!response.ok) throw new Error('방송 정보 조회에 실패했습니다.');
+  const text = await response.text();
+  if (!text.trim()) return null;
+  const data: unknown = JSON.parse(text);
+  if (data === null) return null;
+  if (typeof data !== 'object' || !('broadNo' in data))
+    throw new Error('방송 번호를 확인할 수 없습니다.');
+  const number = data.broadNo;
+  if (
+    (typeof number === 'number' &&
+      Number.isSafeInteger(number) &&
+      number > 0) ||
+    (typeof number === 'string' && /^[1-9]\d*$/.test(number))
+  )
+    return String(number);
+  throw new Error('방송 번호를 확인할 수 없습니다.');
+};
+
 type State = 'stopped' | 'waiting' | 'connecting' | 'collecting' | 'error';
 type Runner = {
   streamer: Streamer;
@@ -23,9 +51,11 @@ type Runner = {
   state: State;
   broadcastNo: string | null;
   lastBroadcastNo: string | null;
+  blockedBroadcastNo: string | null;
   lastError: { code: string; message: string } | null;
   active: boolean;
   fatal: boolean;
+  controller: AbortController;
   timer: ReturnType<typeof setTimeout> | undefined;
   attempt: Promise<void> | undefined;
   unsubscribe: (() => void)[];
@@ -36,6 +66,7 @@ export class Collector {
   readonly runners = new Map<string, Runner>();
   readonly createChat: ChatFactory;
   readonly resolverOverride: ChannelResolver | undefined;
+  readonly lookupBroadcast: BroadcastLookup;
   private readonly restarting = new Map<string, number>();
   private closing = false;
   private authentication: Promise<SoopAuthentication> | undefined;
@@ -46,10 +77,12 @@ export class Collector {
     store: Store,
     createChat: ChatFactory = (options) => new SoopChat(options),
     resolver?: ChannelResolver,
+    broadcastLookup: BroadcastLookup = lookupBroadcast,
   ) {
     this.store = store;
     this.createChat = createChat;
     this.resolverOverride = resolver;
+    this.lookupBroadcast = broadcastLookup;
     this.credentials = store.getCredentials();
   }
 
@@ -132,9 +165,11 @@ export class Collector {
       state: 'waiting',
       broadcastNo: null,
       lastBroadcastNo,
+      blockedBroadcastNo: null,
       lastError: null,
       active: true,
       fatal: false,
+      controller: new AbortController(),
       timer: undefined,
       attempt: undefined,
       unsubscribe: [],
@@ -235,23 +270,47 @@ export class Collector {
 
   private attempt(runner: Runner) {
     if (!runner.active || runner.fatal || runner.attempt) return;
-    try {
-      const streamer = this.store.getStreamer(runner.streamer.streamer_id);
-      if (streamer.room_password !== runner.streamer.room_password) {
-        void this.restart(streamer.streamer_id).catch(() =>
-          this.failStorage(runner),
-        );
+    const id = runner.streamer.streamer_id;
+    if (!runner.blockedBroadcastNo) runner.state = 'connecting';
+    let broadcastNo: string | null = null;
+    runner.attempt = (async () => {
+      const signal = AbortSignal.any([
+        runner.controller.signal,
+        AbortSignal.timeout(10_000),
+      ]);
+      broadcastNo = await this.lookupBroadcast(id, signal);
+      signal.throwIfAborted();
+      if (!runner.active || runner.fatal) return;
+      if (runner.lastBroadcastNo && runner.lastBroadcastNo !== broadcastNo) {
+        try {
+          this.store.markEnded(id, runner.lastBroadcastNo);
+          runner.lastBroadcastNo = null;
+        } catch {
+          this.failStorage(runner);
+          return;
+        }
+      }
+      if (runner.blockedBroadcastNo) {
+        if (!broadcastNo || broadcastNo === runner.blockedBroadcastNo) return;
+        runner.blockedBroadcastNo = null;
+      }
+      if (!broadcastNo) throw new BroadcastOfflineError(id);
+      runner.state = 'connecting';
+      try {
+        const streamer = this.store.getStreamer(id);
+        if (streamer.room_password !== runner.streamer.room_password) {
+          void this.restart(id).catch(() => this.failStorage(runner));
+          return;
+        }
+      } catch {
+        this.failStorage(runner);
         return;
       }
-    } catch {
-      this.failStorage(runner);
-      return;
-    }
-    runner.state = 'connecting';
-    runner.attempt = runner.chat
-      .connect()
+      await runner.chat.connect();
+    })()
       .catch((error: unknown) => {
         if (!runner.active || runner.fatal) return;
+        if (runner.blockedBroadcastNo) return;
         runner.broadcastNo = null;
         if (error instanceof BroadcastOfflineError) {
           runner.state = 'waiting';
@@ -274,9 +333,11 @@ export class Collector {
               error instanceof SoopChatError ? error.code : 'CONNECTION_ERROR',
             message:
               error instanceof RestrictedRoomError
-                ? `방송 접근이 제한되었습니다 (${error.reason}).`
+                ? `방송 접근이 제한되었습니다 (${error.reason}). 새 방송을 기다립니다.`
                 : '방송에 접속할 수 없습니다.',
           };
+          if (error instanceof RestrictedRoomError)
+            runner.blockedBroadcastNo = broadcastNo;
         }
       })
       .finally(() => {
@@ -296,6 +357,7 @@ export class Collector {
 
   private failStorage(runner: Runner) {
     runner.fatal = true;
+    runner.controller.abort();
     runner.state = 'error';
     runner.lastError = {
       code: 'STORAGE_ERROR',
@@ -310,6 +372,7 @@ export class Collector {
 
   private dispose(runner: Runner) {
     runner.active = false;
+    runner.controller.abort();
     if (runner.timer) clearTimeout(runner.timer);
     for (const off of runner.unsubscribe) off();
     return runner.chat.disconnect().catch(() => {});

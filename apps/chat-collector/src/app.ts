@@ -7,7 +7,11 @@ import cors from '@fastify/cors';
 import Fastify, { type FastifyError } from 'fastify';
 import type { ChannelResolver } from 'soop-chat';
 
-import { type ChatFactory, Collector } from './collector.ts';
+import {
+  type BroadcastLookup,
+  type ChatFactory,
+  Collector,
+} from './collector.ts';
 import { csvDownload, sqliteDownload } from './download.ts';
 import sqlitePlugin from './lib/fastifyNodeSqlite.ts';
 import { runQuery } from './query.ts';
@@ -51,6 +55,7 @@ export async function buildApp(options: {
   corsOrigins?: string[];
   createChat?: ChatFactory;
   resolveChannel?: ChannelResolver;
+  lookupBroadcast?: BroadcastLookup;
 }) {
   if (!options.apiKey.trim())
     throw new Error('COLLECTOR_API_KEY를 설정해야 합니다.');
@@ -91,6 +96,7 @@ export async function buildApp(options: {
       store,
       options.createChat,
       options.resolveChannel,
+      options.lookupBroadcast,
     );
     const shutdown = new AbortController();
     let retentionTimer: ReturnType<typeof setTimeout> | undefined;

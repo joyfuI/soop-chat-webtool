@@ -18,6 +18,7 @@ import {
   type ConnectionState,
   type NodeSoopChatOptions,
   ProtocolError,
+  RestrictedRoomError,
   SoopChat,
   type SoopChatEventMap,
   type SoopChatEventType,
@@ -26,6 +27,7 @@ import {
 } from 'soop-chat';
 
 import { buildApp } from '../src/app.ts';
+import type { BroadcastLookup } from '../src/collector.ts';
 import { csvDownload, sqliteDownload } from '../src/download.ts';
 import { runQuery } from '../src/query.ts';
 import { DAY_MS, MAX_RETENTION_DAYS } from '../src/storage.ts';
@@ -125,6 +127,7 @@ async function fixture(
   t: TestContext,
   resolver: ChannelResolver | null = async () => channel(),
   corsOrigins: string[] = [],
+  lookupBroadcast: BroadcastLookup | null = async () => '1001',
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), 'collector-test-'));
   const chats: FakeChat[] = [];
@@ -134,6 +137,7 @@ async function fixture(
     dataDir,
     corsOrigins,
     ...(resolver ? { resolveChannel: resolver } : {}),
+    ...(lookupBroadcast ? { lookupBroadcast } : {}),
     createChat: (opts: NodeSoopChatOptions) => {
       const chat = new FakeChat(opts);
       chats.push(chat);
@@ -979,6 +983,270 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   f.chats.at(-1)?.emit('event', event());
   assert.equal(f.store.findBroadcast('1002').event_count, count);
   t.mock.timers.reset();
+});
+
+test('restricted broadcasts wait for a new number; settings preserve the block and stop/start retries the same broadcast', async (t) => {
+  for (const reason of [
+    'password',
+    'subscriptionPlus',
+    'adult',
+    'loginRequired',
+  ] as const) {
+    await t.test(reason, async (t) => {
+      let broadcastNo: string | null = '1001';
+      let denied = true;
+      let metadataFailure: 'http' | 'json' | 'number' | null = null;
+      let polls = 0;
+      let liveRequests = 0;
+      let passwordChecks = 0;
+      const logins: (string | null)[] = [];
+      const passwords: (string | null)[] = [];
+      t.mock.method(
+        globalThis,
+        'fetch',
+        async (input: string, init: RequestInit) => {
+          if (input.startsWith('https://api-channel.sooplive.com/')) {
+            polls++;
+            assert.equal(new Headers(init.headers).get('cookie'), null);
+            assert.equal(init.body, undefined);
+            if (metadataFailure === 'http')
+              return new Response('', { status: 503 });
+            if (metadataFailure === 'json') return new Response('{');
+            if (metadataFailure === 'number')
+              return Response.json({ broadNo: -1 });
+            return broadcastNo === null
+              ? new Response('')
+              : Response.json({ broadNo: Number(broadcastNo) });
+          }
+          const body = new URLSearchParams(String(init.body));
+          if (input.startsWith('https://login.sooplive.com/')) {
+            logins.push(body.get('szUid'));
+            return Response.json(
+              { RESULT: 1 },
+              { headers: { 'set-cookie': 'AuthTicket=ticket; Path=/' } },
+            );
+          }
+          assert.ok(input.startsWith('https://live.sooplive.com/'));
+          passwords.push(body.get('pwd'));
+          if (body.get('type') === 'aid') {
+            passwordChecks++;
+            return Response.json({ CHANNEL: { RESULT: denied ? 0 : 1 } });
+          }
+          liveRequests++;
+          if (denied && reason !== 'password')
+            return Response.json({
+              CHANNEL: {
+                RESULT:
+                  reason === 'adult'
+                    ? -6
+                    : reason === 'subscriptionPlus'
+                      ? -14
+                      : -1,
+                REASON: reason === 'loginRequired' ? 'login required' : '',
+              },
+            });
+          return Response.json({
+            CHANNEL: {
+              RESULT: 1,
+              BNO: broadcastNo,
+              CHATNO: '1',
+              CHDOMAIN: 'localhost',
+              CHPT: 8000,
+              BPWD: reason === 'password' ? 'Y' : 'N',
+              TK: 'ticket',
+              FTK: 'fan-ticket',
+            },
+          });
+        },
+      );
+      const f = await fixture(t, null, [], null);
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      await f.call('PATCH', '/api/settings', {
+        username: 'first-account',
+        password: 'first-secret',
+      });
+      await f.call('POST', '/api/streamers', {
+        streamerId: 'user123',
+        roomPassword: 'wrong',
+      });
+      await f.call('POST', '/api/collection/start/user123');
+      await flush();
+      assert.equal(liveRequests, 1);
+      assert.equal(polls, 1);
+      assert.equal(passwordChecks, reason === 'password' ? 1 : 0);
+      assert.equal(
+        f.collector.status(f.store.getStreamer('user123')).state,
+        'error',
+      );
+      assert.equal(
+        f.collector.status(f.store.getStreamer('user123')).lastError?.code,
+        'RESTRICTED_ROOM',
+      );
+      assert.equal(f.store.listBroadcasts().length, 0);
+      t.mock.timers.tick(9999);
+      await flush();
+      assert.equal(polls, 1);
+      t.mock.timers.tick(1);
+      await flush();
+      assert.equal(polls, 2);
+      await f.call('PATCH', '/api/streamers/user123', {
+        roomPassword: 'updated',
+      });
+      await f.call('PATCH', '/api/settings', {
+        username: 'second-account',
+        password: 'second-secret',
+      });
+      // Neither going offline, returning with the same number nor invalid metadata unblocks access.
+      for (const next of [null, '1001']) {
+        broadcastNo = next;
+        t.mock.timers.tick(10_000);
+        await flush();
+      }
+      for (const failure of ['http', 'json', 'number'] as const) {
+        metadataFailure = failure;
+        t.mock.timers.tick(10_000);
+        await flush();
+      }
+      metadataFailure = null;
+      assert.equal(liveRequests, 1);
+      assert.equal(passwordChecks, reason === 'password' ? 1 : 0);
+      assert.deepEqual(logins, ['first-account']);
+      assert.equal(
+        f.chats.reduce((n, chat) => n + chat.connections, 0),
+        1,
+      );
+      assert.equal(
+        f.collector.status(f.store.getStreamer('user123')).lastError?.code,
+        'RESTRICTED_ROOM',
+      );
+      await f.call('POST', '/api/collection/stop/user123');
+      await f.call('POST', '/api/collection/start/user123');
+      await flush();
+      assert.equal(liveRequests, 2);
+      assert.equal(passwordChecks, reason === 'password' ? 2 : 0);
+      assert.deepEqual(logins, ['first-account', 'second-account']);
+      assert.equal(passwords.at(-1), 'updated');
+      assert.equal(
+        f.chats.reduce((n, chat) => n + chat.connections, 0),
+        2,
+      );
+      assert.equal(
+        f.collector.status(f.store.getStreamer('user123')).lastError?.code,
+        'RESTRICTED_ROOM',
+      );
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(liveRequests, 2);
+      broadcastNo = '1002';
+      denied = false;
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(liveRequests, 3);
+      assert.deepEqual(
+        logins,
+        reason === 'password'
+          ? ['first-account', 'second-account']
+          : ['first-account', 'second-account', 'second-account'],
+      );
+      assert.equal(passwords.at(-1), 'updated');
+      assert.equal(
+        f.collector.status(f.store.getStreamer('user123')).state,
+        'collecting',
+      );
+      assert.equal(
+        f.collector.status(f.store.getStreamer('user123')).lastError,
+        null,
+      );
+      assert.equal(f.store.findBroadcast('1002').event_count, 1);
+      const collectingPolls = polls;
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(polls, collectingPolls);
+      // A later denied broadcast receives its own block, independent of the old number.
+      broadcastNo = '1003';
+      denied = true;
+      f.chats.at(-1)?.transition('closed');
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(liveRequests, 4);
+      assert.ok(f.store.findBroadcast('1002').ended_at);
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(liveRequests, 4);
+    });
+  }
+});
+
+test('ordinary connection failures retry at 10 seconds; one restricted streamer does not block another', async (t) => {
+  const calls = new Map<string, number>();
+  const f = await fixture(t, async (id) => {
+    const count = (calls.get(id) ?? 0) + 1;
+    calls.set(id, count);
+    if (id === 'denied1') throw new RestrictedRoomError('unknown');
+    if (count === 1) throw new Error('network error');
+    return channel();
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const id of ['denied1', 'user123']) {
+    await f.call('POST', '/api/streamers', { streamerId: id });
+    await f.call('POST', `/api/collection/start/${id}`);
+  }
+  await flush();
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(calls.get('denied1'), 1);
+  assert.equal(calls.get('user123'), 2);
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'collecting',
+  );
+});
+
+test('stop and shutdown abort pending broadcast-number polls and release retry timers', async (t) => {
+  let polls = 0;
+  let signal: AbortSignal | undefined;
+  const f = await fixture(
+    t,
+    async () => {
+      throw new RestrictedRoomError('password');
+    },
+    [],
+    (_id, currentSignal) => {
+      if (++polls === 1) return Promise.resolve('1001');
+      signal = currentSignal;
+      return new Promise((_resolve, reject) => {
+        currentSignal.addEventListener(
+          'abort',
+          () => reject(currentSignal.reason),
+          { once: true },
+        );
+      });
+    },
+  );
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(signal?.aborted, false);
+  await f.call('POST', '/api/collection/stop/user123');
+  assert.equal(signal?.aborted, true);
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(polls, 2);
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  assert.equal(signal?.aborted, false);
+  await f.app.close();
+  assert.equal(signal?.aborted, true);
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(polls, 3);
+  assert.equal(
+    f.chats.reduce((n, chat) => n + chat.connections, 0),
+    1,
+  );
 });
 
 test('room password changes and clearing preserve collection and apply on automatic retry or a later start', async (t) => {
