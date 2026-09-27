@@ -28,6 +28,7 @@ import {
 import { buildApp } from '../src/app.ts';
 import { csvDownload, sqliteDownload } from '../src/download.ts';
 import { runQuery } from '../src/query.ts';
+import { DAY_MS, MAX_RETENTION_DAYS } from '../src/storage.ts';
 
 const headers = { authorization: 'Bearer test-api-key' };
 const key = Buffer.alloc(32, 7);
@@ -174,9 +175,8 @@ async function fixture(
   };
 }
 
-async function flush() {
-  await setImmediate();
-  await setImmediate();
+async function flush(turns = 2) {
+  for (let turn = 0; turn < turns; turn++) await setImmediate();
 }
 
 test('API authentication, ID boundaries, registration, password encryption, SQLite settings', async (t) => {
@@ -357,6 +357,431 @@ test('API authentication, ID boundaries, registration, password encryption, SQLi
   assert.throws(() => reopened.store.getCredentials());
   reopened.store.updateCredentials(null, null);
   assert.equal(reopened.store.getCredentials(), undefined);
+});
+
+test('retention API validates days, preserves partial updates and registration settings without reconnecting', async (t) => {
+  const f = await fixture(t);
+  const created = await f.call('POST', '/api/streamers', {
+    streamerId: 'user123',
+    roomPassword: 'room-secret',
+  });
+  assert.equal(created.statusCode, 201);
+  assert.equal(created.json().retentionDays, 0);
+  assert.equal(f.store.getStreamer('user123').retention_days, 0);
+  for (const retentionDays of [
+    null,
+    -1,
+    0.5,
+    '30',
+    true,
+    [30],
+    MAX_RETENTION_DAYS + 1,
+    Number.MAX_SAFE_INTEGER,
+  ]) {
+    assert.equal(
+      (
+        await f.call('POST', '/api/streamers', {
+          streamerId: 'other123',
+          retentionDays,
+        })
+      ).statusCode,
+      400,
+    );
+    assert.equal(
+      (await f.call('PATCH', '/api/streamers/user123', { retentionDays }))
+        .statusCode,
+      400,
+    );
+  }
+  for (const payload of [{}, { other: 30 }])
+    assert.equal(
+      (await f.call('PATCH', '/api/streamers/user123', payload)).statusCode,
+      400,
+    );
+  for (const value of ['-1', 'NULL', '1.5', "'invalid'"])
+    assert.throws(() =>
+      f.store.settings.exec(`UPDATE streamers SET retention_days = ${value}`),
+    );
+  assert.throws(() =>
+    f.store.updateStreamer('user123', {
+      retentionDays: MAX_RETENTION_DAYS + 1,
+    }),
+  );
+  assert.equal(
+    (await f.call('PATCH', '/api/streamers/missing123', { retentionDays: 1 }))
+      .statusCode,
+    404,
+  );
+  assert.equal(
+    (
+      await f.call('POST', '/api/streamers', {
+        streamerId: 'other123',
+        retentionDays: MAX_RETENTION_DAYS,
+      })
+    ).json().retentionDays,
+    MAX_RETENTION_DAYS,
+  );
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  const before = f.chats.length;
+  f.store.saveEvent(
+    'user123',
+    'expired',
+    event('unknown', Date.now() - 100 * DAY_MS),
+  );
+  const changed = await f.call('PATCH', '/api/streamers/user123', {
+    retentionDays: 30,
+  });
+  assert.equal(changed.json().retentionDays, 30);
+  assert.equal(f.store.getStreamer('user123').room_password, 'room-secret');
+  assert.equal(f.chats.length, before);
+  assert.equal(chat?.disconnections, 0);
+  assert.equal(f.store.findBroadcast('expired').broadcast_no, 'expired');
+  await f.call('PATCH', '/api/streamers/user123', { roomPassword: null });
+  await flush();
+  assert.equal(f.store.getStreamer('user123').retention_days, 30);
+  assert.equal(f.store.getStreamer('user123').room_password, null);
+  assert.equal(f.chats.length, before + 1);
+  await f.call('PATCH', '/api/streamers/user123', {
+    roomPassword: 'changed',
+    retentionDays: 7,
+  });
+  await flush();
+  assert.equal(f.store.getStreamer('user123').retention_days, 7);
+  assert.equal(f.chats.at(-1)?.options.roomPassword, 'changed');
+  assert.equal(
+    (await f.call('POST', '/api/collection/stop/user123')).json().retentionDays,
+    7,
+  );
+  assert.equal(
+    (await f.call('POST', '/api/collection/stop')).json()[0].retentionDays,
+    MAX_RETENTION_DAYS,
+  );
+  assert.equal(
+    (await f.call('GET', '/api/streamers')).json()[1].retentionDays,
+    7,
+  );
+  await f.call('DELETE', '/api/streamers/user123');
+  assert.equal(f.store.getStreamer('user123', false).retention_days, 7);
+  const registered = await f.call('POST', '/api/streamers', {
+    streamerId: 'USER123',
+  });
+  assert.equal(registered.json().retentionDays, 7);
+  assert.equal(registered.json().enabled, false);
+  await f.call('DELETE', '/api/streamers/user123');
+  assert.equal(
+    (
+      await f.call('POST', '/api/streamers', {
+        streamerId: 'user123',
+        retentionDays: 0,
+      })
+    ).json().retentionDays,
+    0,
+  );
+});
+
+test('retention runs at startup and daily, uses first collection time and deletes whole broadcasts at the boundary', async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  const f = await fixture(t);
+  f.store.addStreamer('alpha123', null, 1);
+  f.store.addStreamer('beta123', null, 2);
+  f.store.addStreamer('forever1', null);
+  f.store.addStreamer('archive1', null, 1);
+  f.store.removeStreamer('archive1');
+  f.store.saveEvent('alpha123', 'shared', event('chatMessage', now - DAY_MS));
+  f.store.saveEvent('alpha123', 'old', event('chatMessage', now - 3 * DAY_MS));
+  f.store.saveEvent('alpha123', 'old', event('chatMessage', now));
+  f.store.saveEvent(
+    'alpha123',
+    'young',
+    event('chatMessage', now - DAY_MS + 1),
+  );
+  f.store.saveEvent('beta123', 'shared', event('chatMessage', now - DAY_MS));
+  f.store.saveEvent(
+    'beta123',
+    'beta-old',
+    event('chatMessage', now - 2 * DAY_MS),
+  );
+  f.store.saveEvent(
+    'forever1',
+    'forever',
+    event('chatMessage', now - 100 * DAY_MS),
+  );
+  f.store.saveEvent(
+    'archive1',
+    'archived',
+    event('chatMessage', now - 100 * DAY_MS),
+  );
+  await f.app.ready();
+  await flush(12);
+  assert.deepEqual(
+    f.store.listBroadcasts('alpha123').map((b) => b.broadcast_no),
+    ['young'],
+  );
+  assert.deepEqual(
+    f.store.listBroadcasts('beta123').map((b) => b.broadcast_no),
+    ['shared'],
+  );
+  assert.equal(
+    f.store
+      .getDatabase('alpha123')
+      .prepare('SELECT count(*) AS count FROM events')
+      .get()?.count,
+    1,
+  );
+  assert.equal(f.store.findBroadcast('forever').event_count, 1);
+  assert.equal(f.store.findBroadcast('archived').event_count, 1);
+  t.mock.timers.tick(DAY_MS - 1);
+  await flush();
+  assert.equal(f.store.findBroadcast('young').event_count, 1);
+  t.mock.timers.tick(1);
+  await flush(12);
+  assert.deepEqual(f.store.listBroadcasts('alpha123'), []);
+  assert.deepEqual(f.store.listBroadcasts('beta123'), []);
+  assert.equal(
+    f.store
+      .getDatabase('alpha123')
+      .prepare('SELECT count(*) AS count FROM events')
+      .get()?.count,
+    0,
+  );
+  await f.call('PATCH', '/api/streamers/forever1', { retentionDays: 1 });
+  f.store.addStreamer('archive1', null);
+  assert.equal(f.store.getStreamer('archive1').retention_days, 1);
+  assert.equal(f.store.findBroadcast('forever').event_count, 1);
+  assert.equal(f.store.findBroadcast('archived').event_count, 1);
+  t.mock.timers.tick(DAY_MS - 1);
+  await flush();
+  assert.equal(f.store.findBroadcast('forever').event_count, 1);
+  t.mock.timers.tick(1);
+  await flush(12);
+  assert.deepEqual(f.store.listBroadcasts(), []);
+  f.store.saveEvent(
+    'alpha123',
+    'disabled-policy',
+    event('chatMessage', Date.now() - 2 * DAY_MS),
+  );
+  await f.call('PATCH', '/api/streamers/alpha123', { retentionDays: 0 });
+  t.mock.timers.tick(DAY_MS);
+  await flush();
+  assert.equal(f.store.findBroadcast('disabled-policy').event_count, 1);
+});
+
+test('retention protects resolving, collecting, retrying and asynchronous restart transitions until collection stops', async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  let resolveFirst: ((value: ReturnType<typeof channel>) => void) | undefined;
+  let first = true;
+  const f = await fixture(t, async () => {
+    if (!first) return channel();
+    first = false;
+    return new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+  });
+  f.store.addStreamer('user123', null, 1);
+  f.store.setEnabled('user123', true);
+  f.store.saveEvent('user123', '1001', event('chatMessage', now - 2 * DAY_MS));
+  f.store.saveEvent('user123', 'older', event('chatMessage', now - 2 * DAY_MS));
+  await f.app.ready();
+  await flush();
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'connecting',
+  );
+  assert.equal(f.store.listBroadcasts().length, 2);
+  assert.ok(resolveFirst);
+  resolveFirst(channel());
+  await flush();
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'collecting',
+  );
+  t.mock.timers.tick(DAY_MS);
+  await flush(12);
+  assert.deepEqual(
+    f.store.listBroadcasts().map((b) => b.broadcast_no),
+    ['1001'],
+  );
+  const chat = f.chats[0];
+  assert.ok(chat);
+  chat.transition('closed');
+  assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
+  t.mock.timers.tick(DAY_MS);
+  await flush();
+  assert.equal(f.store.findBroadcast('1001').event_count, 3);
+  let releaseDisconnect: (() => void) | undefined;
+  const disconnect = chat.disconnect.bind(chat);
+  t.mock.method(
+    chat,
+    'disconnect',
+    () =>
+      new Promise<void>((resolve) => {
+        releaseDisconnect = () => {
+          void disconnect().then(resolve);
+        };
+      }),
+  );
+  const pending = f.call('PATCH', '/api/streamers/user123', {
+    roomPassword: 'changed',
+  });
+  await flush();
+  assert.equal(f.collector.runners.has('user123'), false);
+  assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
+  assert.equal(
+    (await f.call('DELETE', '/api/broadcasts/1001')).statusCode,
+    409,
+  );
+  t.mock.timers.tick(DAY_MS);
+  await flush();
+  assert.equal(f.store.findBroadcast('1001').event_count, 3);
+  assert.ok(releaseDisconnect);
+  releaseDisconnect();
+  assert.equal((await pending).statusCode, 200);
+  await flush();
+  assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
+  await f.call('POST', '/api/collection/stop/user123');
+  assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), true);
+  t.mock.timers.tick(DAY_MS);
+  await flush();
+  assert.deepEqual(f.store.listBroadcasts(), []);
+});
+
+test('retention protection survives overlapping restarts and shutdown prevents a delayed restart', async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', {
+    streamerId: 'user123',
+    retentionDays: 1,
+  });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  let releaseDisconnect: (() => void) | undefined;
+  const disconnect = chat.disconnect.bind(chat);
+  t.mock.method(
+    chat,
+    'disconnect',
+    () =>
+      new Promise<void>((resolve) => {
+        releaseDisconnect = () => {
+          void disconnect().then(resolve);
+        };
+      }),
+  );
+  const delayed = f.collector.restart('user123');
+  await f.collector.restart('USER123');
+  await flush();
+  assert.equal(f.chats.length, 2);
+  assert.equal(
+    f.collector.canDeleteBroadcast('user123', 'another-broadcast'),
+    false,
+  );
+  const databasePath = f.store.databasePath('user123');
+  await f.app.close();
+  assert.ok(releaseDisconnect);
+  releaseDisconnect();
+  await delayed;
+  assert.equal(f.collector.runners.size, 0);
+  assert.equal(f.chats.length, 2);
+  assert.equal(
+    f.collector.canDeleteBroadcast('user123', 'another-broadcast'),
+    true,
+  );
+  const reader = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    assert.equal(
+      reader.prepare('SELECT count(*) AS count FROM broadcasts').get()?.count,
+      1,
+    );
+  } finally {
+    reader.close();
+  }
+});
+
+test('retention failure leaves collection state unchanged and retries next day while other streamers are cleaned', async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  const f = await fixture(t);
+  f.store.addStreamer('failed1', null, 1);
+  f.store.addStreamer('other123', null, 1);
+  f.store.saveEvent('failed1', 'failed', event('chatMessage', now - DAY_MS));
+  f.store.saveEvent('other123', 'other', event('chatMessage', now - DAY_MS));
+  const blocked = f.store.getDatabase('failed1');
+  blocked.exec('PRAGMA query_only = ON');
+  const logged = t.mock.method(f.app.log, 'error', () => {});
+  await f.app.ready();
+  await flush();
+  assert.equal(logged.mock.callCount(), 1);
+  assert.deepEqual(logged.mock.calls[0]?.arguments[0], {
+    streamerId: 'failed1',
+  });
+  assert.equal(
+    f.collector.status(f.store.getStreamer('failed1')).state,
+    'stopped',
+  );
+  assert.equal(f.store.findBroadcast('failed').event_count, 1);
+  assert.deepEqual(f.store.listBroadcasts('other123'), []);
+  blocked.exec('PRAGMA query_only = OFF');
+  t.mock.timers.tick(DAY_MS);
+  await flush();
+  assert.deepEqual(f.store.listBroadcasts(), []);
+  assert.equal(logged.mock.callCount(), 1);
+});
+
+test('retention yields between broadcasts, rechecks registration, does not overlap and cancels on shutdown', async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now });
+  const f = await fixture(t);
+  f.store.addStreamer('archive1', null, 1);
+  f.store.addStreamer('user123', null, 1);
+  for (let index = 0; index < 20; index++) {
+    f.store.saveEvent(
+      'archive1',
+      `archive-${index}`,
+      event('chatMessage', now - DAY_MS),
+    );
+    f.store.saveEvent(
+      'user123',
+      `user-${index}`,
+      event('chatMessage', now - DAY_MS),
+    );
+  }
+  const original = f.store.deleteBroadcast.bind(f.store);
+  const deletions = t.mock.method(f.store, 'deleteBroadcast', (broadcast) => {
+    assert.equal(f.store.settings.isOpen, true);
+    original(broadcast);
+    if (broadcast.streamer_id === 'archive1')
+      queueMicrotask(() => f.store.removeStreamer('archive1'));
+  });
+  await f.app.ready();
+  const initial = deletions.mock.callCount();
+  assert.equal(initial, 1);
+  t.mock.timers.tick(2 * DAY_MS);
+  assert.equal(deletions.mock.callCount(), initial);
+  await flush();
+  assert.equal(f.store.listBroadcasts('archive1').length, 19);
+  assert.ok(deletions.mock.callCount() > initial);
+  const databasePath = f.store.databasePath('user123');
+  await f.app.close();
+  const completed = deletions.mock.callCount();
+  assert.ok(completed < 21);
+  assert.equal(f.store.settings.isOpen, false);
+  t.mock.timers.tick(3 * DAY_MS);
+  await flush();
+  assert.equal(deletions.mock.callCount(), completed);
+  const reader = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    assert.ok(
+      Number(
+        reader.prepare('SELECT count(*) AS count FROM broadcasts').get()?.count,
+      ) > 0,
+    );
+  } finally {
+    reader.close();
+  }
 });
 
 test('offline retry at 10 seconds, event routing, broadcast rollover, storage error', async (t) => {

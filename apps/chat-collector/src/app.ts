@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
+import { setImmediate } from 'node:timers/promises';
 import Fastify, { type FastifyError } from 'fastify';
 import type { ChannelResolver } from 'soop-chat';
 
@@ -9,7 +10,13 @@ import { type ChatFactory, Collector } from './collector.ts';
 import { csvDownload, sqliteDownload } from './download.ts';
 import sqlitePlugin from './lib/fastifyNodeSqlite.ts';
 import { runQuery } from './query.ts';
-import { ApiError, initializeSettings, Store } from './storage.ts';
+import {
+  ApiError,
+  DAY_MS,
+  initializeSettings,
+  MAX_RETENTION_DAYS,
+  Store,
+} from './storage.ts';
 
 type StreamerParams = { streamerId: string };
 type BroadcastParams = { broadcastNo: string };
@@ -28,6 +35,11 @@ const passwordSchema = {
   type: 'string',
   minLength: 1,
   pattern: '^[^\\u0000-\\u001f\\u007f]+$',
+};
+const retentionSchema = {
+  type: 'integer',
+  minimum: 0,
+  maximum: MAX_RETENTION_DAYS,
 };
 
 export async function buildApp(options: {
@@ -55,7 +67,7 @@ export async function buildApp(options: {
           ],
         }
       : false,
-    ajv: { customOptions: { removeAdditional: false } },
+    ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   try {
     await app.register(sqlitePlugin, {
@@ -70,6 +82,53 @@ export async function buildApp(options: {
       options.resolveChannel,
     );
     const shutdown = new AbortController();
+    let retentionTimer: ReturnType<typeof setTimeout> | undefined;
+    let retentionRun: Promise<void> | undefined;
+    const cleanExpiredBroadcasts = async () => {
+      const now = Date.now();
+      for (const streamer of store.listStreamers()) {
+        if (shutdown.signal.aborted) return;
+        if (streamer.retention_days === 0) continue;
+        try {
+          const expired = store.listExpiredBroadcasts(
+            streamer.streamer_id,
+            now - streamer.retention_days * DAY_MS,
+          );
+          for (const broadcast of expired) {
+            if (shutdown.signal.aborted) return;
+            if (!store.getStreamer(streamer.streamer_id, false).registered)
+              break;
+            if (
+              !collector.canDeleteBroadcast(
+                streamer.streamer_id,
+                broadcast.broadcast_no,
+              )
+            )
+              continue;
+            store.deleteBroadcast(broadcast);
+            await setImmediate();
+          }
+        } catch {
+          app.log.error(
+            { streamerId: streamer.streamer_id },
+            '보존 기간이 지난 방송 삭제에 실패했습니다.',
+          );
+        }
+      }
+    };
+    const startRetentionCleanup = () => {
+      if (shutdown.signal.aborted) return;
+      retentionRun = cleanExpiredBroadcasts()
+        .catch(() => {
+          app.log.error('채팅 보존 기간 정리에 실패했습니다.');
+        })
+        .finally(() => {
+          retentionRun = undefined;
+          if (shutdown.signal.aborted) return;
+          retentionTimer = setTimeout(startRetentionCleanup, DAY_MS);
+          retentionTimer.unref();
+        });
+    };
     const streams = new Set<Readable>();
     const expectedKey = createHash('sha256')
       .update(`Bearer ${options.apiKey}`)
@@ -99,7 +158,8 @@ export async function buildApp(options: {
     });
     app.addHook('preClose', async () => {
       shutdown.abort();
-      await collector.shutdown();
+      if (retentionTimer) clearTimeout(retentionTimer);
+      await Promise.all([collector.shutdown(), retentionRun]);
       for (const stream of streams) stream.destroy();
     });
     app.addHook('onClose', async () => store.close());
@@ -107,7 +167,13 @@ export async function buildApp(options: {
     app.get('/api/streamers', async () =>
       store.listStreamers().map((s) => collector.status(s)),
     );
-    app.post<{ Body: { streamerId: string; roomPassword?: string } }>(
+    app.post<{
+      Body: {
+        streamerId: string;
+        roomPassword?: string;
+        retentionDays?: number;
+      };
+    }>(
       '/api/streamers',
       {
         schema: {
@@ -115,7 +181,11 @@ export async function buildApp(options: {
             type: 'object',
             additionalProperties: false,
             required: ['streamerId'],
-            properties: { streamerId: idSchema, roomPassword: passwordSchema },
+            properties: {
+              streamerId: idSchema,
+              roomPassword: passwordSchema,
+              retentionDays: retentionSchema,
+            },
           },
         },
       },
@@ -127,13 +197,14 @@ export async function buildApp(options: {
               store.addStreamer(
                 request.body.streamerId,
                 request.body.roomPassword ?? null,
+                request.body.retentionDays,
               ),
             ),
           ),
     );
     app.patch<{
       Params: StreamerParams;
-      Body: { roomPassword: string | null };
+      Body: { roomPassword?: string | null; retentionDays?: number };
     }>(
       '/api/streamers/:streamerId',
       {
@@ -142,17 +213,19 @@ export async function buildApp(options: {
           body: {
             type: 'object',
             additionalProperties: false,
-            required: ['roomPassword'],
+            minProperties: 1,
             properties: {
               roomPassword: { anyOf: [passwordSchema, { type: 'null' }] },
+              retentionDays: retentionSchema,
             },
           },
         },
       },
       async (request) => {
         const streamer = store.getStreamer(request.params.streamerId);
-        store.updatePassword(streamer.streamer_id, request.body.roomPassword);
-        await collector.restart(streamer.streamer_id);
+        store.updateStreamer(streamer.streamer_id, request.body);
+        if (request.body.roomPassword !== undefined)
+          await collector.restart(streamer.streamer_id);
         return collector.status(store.getStreamer(streamer.streamer_id));
       },
     );
@@ -329,6 +402,7 @@ export async function buildApp(options: {
     app.addHook('onReady', async () => {
       for (const streamer of store.listStreamers())
         if (streamer.enabled) collector.start(streamer);
+      startRetentionCleanup();
     });
     return { app, store, collector };
   } catch (error) {

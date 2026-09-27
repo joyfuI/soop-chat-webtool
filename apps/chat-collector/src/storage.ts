@@ -4,6 +4,14 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { RawPacket } from 'soop-chat';
 
+export const DAY_MS = 86_400_000;
+export const MAX_RETENTION_DAYS = Math.floor(Number.MAX_SAFE_INTEGER / DAY_MS);
+
+function validateRetentionDays(days: number) {
+  if (!Number.isSafeInteger(days) || days < 0 || days > MAX_RETENTION_DAYS)
+    throw new ApiError(400, '채팅 보존 일수가 올바르지 않습니다.');
+}
+
 export class ApiError extends Error {
   readonly statusCode: number;
 
@@ -16,6 +24,7 @@ export class ApiError extends Error {
 export type Streamer = {
   streamer_id: string;
   room_password: string | null;
+  retention_days: number;
   registered: number;
   enabled: number;
   created_at: number;
@@ -107,6 +116,7 @@ export function initializeSettings(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS streamers (
       streamer_id TEXT PRIMARY KEY COLLATE NOCASE NOT NULL,
       room_password TEXT,
+      retention_days INTEGER NOT NULL DEFAULT 0 CHECK (retention_days >= 0),
       registered INTEGER NOT NULL DEFAULT 1 CHECK (registered IN (0, 1)),
       enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
       created_at INTEGER NOT NULL,
@@ -159,7 +169,11 @@ export class Store {
     return row;
   }
 
-  addStreamer(id: string, password: string | null): Streamer {
+  addStreamer(
+    id: string,
+    password: string | null,
+    retentionDays?: number,
+  ): Streamer {
     if (!/^[A-Za-z0-9]{6,12}$/.test(id))
       throw new ApiError(400, '스트리머 ID가 올바르지 않습니다.');
     const previous = this.settings
@@ -168,25 +182,41 @@ export class Store {
     if (previous?.registered)
       throw new ApiError(409, '이미 등록된 스트리머입니다.');
     const canonical = previous?.streamer_id ?? id;
+    const days = retentionDays ?? previous?.retention_days ?? 0;
+    validateRetentionDays(days);
     this.getDatabase(canonical);
     const now = Date.now();
     this.settings
       .prepare(`
-      INSERT INTO streamers (streamer_id, room_password, created_at, updated_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO streamers (streamer_id, room_password, retention_days, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(streamer_id) DO UPDATE SET room_password = excluded.room_password,
+        retention_days = excluded.retention_days,
         registered = 1, enabled = 0, updated_at = excluded.updated_at
     `)
-      .run(canonical, password, now, now);
+      .run(canonical, password, days, now, now);
     return this.getStreamer(canonical);
   }
 
-  updatePassword(id: string, password: string | null) {
+  updateStreamer(
+    id: string,
+    changes: { roomPassword?: string | null; retentionDays?: number },
+  ) {
+    const streamer = this.getStreamer(id);
+    const days = changes.retentionDays ?? streamer.retention_days;
+    validateRetentionDays(days);
     this.settings
       .prepare(
-        'UPDATE streamers SET room_password = ?, updated_at = ? WHERE streamer_id = ?',
+        'UPDATE streamers SET room_password = ?, retention_days = ?, updated_at = ? WHERE streamer_id = ?',
       )
-      .run(password, Date.now(), this.getStreamer(id).streamer_id);
+      .run(
+        changes.roomPassword === undefined
+          ? streamer.room_password
+          : changes.roomPassword,
+        days,
+        Date.now(),
+        streamer.streamer_id,
+      );
   }
 
   setEnabled(id: string, enabled: boolean) {
@@ -363,6 +393,14 @@ export class Store {
     if (matches.length > 1)
       throw new ApiError(409, '여러 스트리머 DB에 같은 방송 번호가 있습니다.');
     return matches[0] as Broadcast;
+  }
+
+  listExpiredBroadcasts(id: string, cutoff: number): Broadcast[] {
+    return this.getDatabase(id)
+      .prepare(
+        'SELECT * FROM broadcasts WHERE first_collected_at <= ? ORDER BY first_collected_at ASC, broadcast_no ASC',
+      )
+      .all(cutoff) as Broadcast[];
   }
 
   deleteBroadcast(broadcast: Broadcast) {

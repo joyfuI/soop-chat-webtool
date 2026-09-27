@@ -36,6 +36,8 @@ export class Collector {
   readonly runners = new Map<string, Runner>();
   readonly createChat: ChatFactory;
   readonly resolverOverride: ChannelResolver | undefined;
+  private readonly restarting = new Map<string, number>();
+  private closing = false;
   private authentication: Promise<SoopAuthentication> | undefined;
   private authController = new AbortController();
   private credentials: ReturnType<Store['getCredentials']>;
@@ -96,6 +98,7 @@ export class Collector {
       broadcastNo: runner?.broadcastNo ?? null,
       lastError: runner?.lastError ?? null,
       roomPasswordConfigured: streamer.room_password !== null,
+      retentionDays: streamer.retention_days,
     };
   }
 
@@ -112,12 +115,14 @@ export class Collector {
   canDeleteBroadcast(id: string, broadcastNo: string) {
     const runner = this.runners.get(id);
     return (
+      !this.restarting.has(id) &&
       !this.isActive(id, broadcastNo) &&
       !(runner?.active && runner.state === 'connecting' && !runner.broadcastNo)
     );
   }
 
   start(streamer: Streamer, lastBroadcastNo: string | null = null) {
+    if (this.closing) return;
     const previous = this.runners.get(streamer.streamer_id);
     if (previous?.active && !previous.fatal) return;
     if (previous) this.dispose(previous);
@@ -306,11 +311,21 @@ export class Collector {
   }
 
   async restart(id: string) {
-    const lastBroadcastNo = this.runners.get(id)?.lastBroadcastNo ?? null;
-    await this.stop(id);
-    const streamer = this.store.getStreamer(id, false);
-    if (streamer.registered && streamer.enabled)
-      this.start(streamer, lastBroadcastNo);
+    const canonical = this.store.getStreamer(id, false).streamer_id;
+    this.restarting.set(canonical, (this.restarting.get(canonical) ?? 0) + 1);
+    try {
+      const lastBroadcastNo =
+        this.runners.get(canonical)?.lastBroadcastNo ?? null;
+      await this.stop(canonical);
+      if (this.closing) return;
+      const streamer = this.store.getStreamer(canonical, false);
+      if (streamer.registered && streamer.enabled)
+        this.start(streamer, lastBroadcastNo);
+    } finally {
+      const remaining = (this.restarting.get(canonical) ?? 1) - 1;
+      if (remaining) this.restarting.set(canonical, remaining);
+      else this.restarting.delete(canonical);
+    }
   }
 
   async reloadCredentials() {
@@ -328,6 +343,7 @@ export class Collector {
   }
 
   async shutdown() {
+    this.closing = true;
     this.authController.abort();
     await Promise.all([...this.runners.keys()].map((id) => this.stop(id)));
   }

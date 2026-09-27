@@ -68,15 +68,38 @@ Node의 내장 TypeScript 실행은 타입을 제거하고 실행하며 타입 �
 - 방 비밀번호 변경은 해당 수집을, SOOP 계정 변경은 시작 상태인 전체 수집을 다시 연결합니다.
 - 등록 해제는 기록을 보존합니다. 재등록하면 같은 파일을 사용합니다. 수집 중인 방송을 삭제하려면 먼저 해당 스트리머를 중지합니다.
 
+## 채팅 보존 기간
+
+스트리머별 `retentionDays`로 보존 일수를 설정합니다. 기본값 `0`은 무제한 보존이며 자동 삭제를 하지 않습니다. 신규 등록할 때 지정하거나 기존 스트리머를 수정할 수 있습니다.
+
+```json
+{ "streamerId": "streamer123", "retentionDays": 30 }
+```
+
+`PATCH /api/streamers/streamer123`으로 보존 기간을 변경합니다. 자동 삭제를 해제하려면 `retentionDays`를 `0`으로 설정합니다.
+
+```json
+{ "retentionDays": 30 }
+```
+
+- 일수는 0 이상의 정수이며, 밀리초 환산이 JavaScript 안전 정수 범위를 넘는 값은 허용하지 않습니다. `null`, 음수, 소수, 문자열도 허용하지 않습니다.
+- 기준은 방송의 최초 채팅 수집 시각인 `first_collected_at`입니다. 1일은 24시간이며, 이 시각으로부터 지정한 기간이 지난 방송을 `broadcast_no` 단위로 관련 이벤트까지 전부 삭제합니다. 최근 채팅 시각과 방송 종료 시각은 기준에 영향을 주지 않습니다.
+- 프로세스 시작 시 수집 자동 재개를 시작한 뒤 정리를 한 번 실행하고, 정리가 끝나면 24시간 뒤 다음 정리를 실행합니다. 별도 NAS 예약 작업은 필요하지 않습니다.
+- 현재 수집·재접속 중인 방송은 보호합니다. 방송 번호를 확인 중이거나 재접속을 위해 연결을 정리 중인 대상도 삭제를 보류하고 다음 정리 때 다시 확인합니다.
+- 중지한 스트리머도 정리 대상입니다. 등록 해제한 스트리머는 자동 삭제에서 제외하며 보존 설정은 유지합니다. 재등록 시 일수를 생략하면 이전 설정을 재사용하고, 지정하면 덮어씁니다.
+- 설정 변경은 다음 정리 또는 프로세스 재시작 시 적용됩니다. 보존 일수만 수정하면 채팅 연결을 재시작하지 않습니다. 정리 중 일부 대상의 삭제가 실패하면 로그에 남기고 다른 대상과 다음 정리는 계속 처리합니다.
+
+이 버전은 새 `_settings.db` 스키마를 전제로 합니다. 기존 DB에 `retention_days`를 추가하는 마이그레이션이나 기존 DB 자동 삭제는 수행하지 않습니다.
+
 ## API
 
 모든 요청에 `Authorization: Bearer <COLLECTOR_API_KEY>`를 지정합니다. JSON 요청은 `Content-Type: application/json`을 사용합니다.
 
 | 메서드 | 경로 | 요청·동작 |
 | --- | --- | --- |
-| POST | `/api/streamers` | `{ "streamerId": "streamer123", "roomPassword": "optional" }`, 등록 후 201 |
+| POST | `/api/streamers` | `{ "streamerId": "streamer123", "roomPassword": "optional", "retentionDays": 30 }`, 비밀번호·보존 일수는 선택, 등록 후 201 |
 | GET | `/api/streamers` | 등록된 전체 대상과 상태 |
-| PATCH | `/api/streamers/:streamerId` | `{ "roomPassword": "new" }`, `null`이면 해제 |
+| PATCH | `/api/streamers/:streamerId` | `roomPassword`, `retentionDays` 중 하나 이상 수정, 생략한 값은 유지, 방 비밀번호는 `null`이면 해제 |
 | DELETE | `/api/streamers/:streamerId` | 중지·등록 해제, 기록 보존, 204 |
 | POST | `/api/collection/start/:streamerId` | 개별 시작 |
 | POST | `/api/collection/stop/:streamerId` | 개별 중지 |
@@ -91,7 +114,7 @@ Node의 내장 TypeScript 실행은 타입을 제거하고 실행하며 타입 �
 | GET | `/api/broadcasts/:broadcastNo/download?format=csv` | 특정 방송의 CSV |
 | POST | `/api/query/:streamerId` | `{ "sql": "SELECT ..." }` |
 
-시작·중지는 반복 호출해도 안전합니다. 대상 목록의 `state`는 `stopped`, `waiting`, `connecting`, `collecting`, `error`이며, `enabled`는 저장된 시작 여부입니다. 비밀번호는 반환하지 않습니다.
+시작·중지는 반복 호출해도 안전합니다. 대상 목록의 `state`는 `stopped`, `waiting`, `connecting`, `collecting`, `error`이며, `enabled`는 저장된 시작 여부입니다. 목록·등록·수정·수집 제어 응답에 `retentionDays`를 포함합니다. 비밀번호는 반환하지 않습니다.
 
 방송 목록은 **페이지네이션 없이 배열 전체**를 반환하며 `first_collected_at` 내림차순, 스트리머 ID·방송 번호 오름차순으로 정렬합니다. DB 컬럼에 `collecting`을 추가해 반환합니다.
 
@@ -137,7 +160,7 @@ SQLite 파일 생성은 동기 복사이므로 매우 큰 방송을 내보내면
 `data/_settings.db`:
 
 - `settings`: 단일 `id=1`, `soop_username`, `soop_password_ciphertext`, `soop_password_iv`, `soop_password_tag`, `updated_at`.
-- `streamers`: `streamer_id`(대소문자 무시 PK), `room_password`, `registered`, `enabled`, `created_at`, `updated_at`.
+- `streamers`: `streamer_id`(대소문자 무시 PK), `room_password`, `retention_days`(INTEGER, NOT NULL, 기본값 0, 0 이상), `registered`, `enabled`, `created_at`, `updated_at`.
 
 `data/<streamerId>.db`:
 
@@ -149,4 +172,4 @@ SQLite 파일 생성은 동기 복사이므로 매우 큰 방송을 내보내면
 
 계정 비밀번호만 AES-256-GCM으로 암호화합니다. 계정 ID·방 비밀번호는 평문, 인증 티켓은 메모리에만 보관합니다. `raw_flags`는 헤더의 두 자리 플래그이며 사용자 권한 플래그와는 다릅니다. `raw_payload`는 헤더를 제외한 본문의 원본 바이트로 다시 해석할 때 사용합니다.
 
-운영 DB에는 `auto_vacuum=FULL`, `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`, `wal_autocheckpoint=1000`을 적용합니다. 삭제 후 체크포인트는 활성 읽기를 기다리지 않고 시도하며, 지연된 공간은 읽기가 끝난 후 재사용·회수됩니다. 보관 기간이나 용량에 따른 자동 삭제는 없습니다.
+운영 DB에는 `auto_vacuum=FULL`, `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`, `wal_autocheckpoint=1000`을 적용합니다. 삭제 후 체크포인트는 활성 읽기를 기다리지 않고 시도하며, 지연된 공간은 읽기가 끝난 후 재사용·회수됩니다. 자동 삭제는 스트리머별 보존 일수에 따르며 용량에 따른 자동 삭제는 없습니다. 방송 하나의 동기 SQLite 삭제가 실행되는 동안에는 API·채팅 처리가 잠시 지연될 수 있습니다.
