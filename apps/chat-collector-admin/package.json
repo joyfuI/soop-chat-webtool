@@ -1,0 +1,33 @@
+{
+  "name": "chat-collector-admin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --strictPort",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --strictPort",
+    "test": "node --test test/*.test.ts",
+    "format": "biome format --write",
+    "lint": "biome lint --write",
+    "check": "biome check --write",
+    "reporter": "biome check --reporter=summary",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "@emotion/react": "catalog:",
+    "@emotion/styled": "catalog:",
+    "@joyfui/ui": "workspace:*",
+    "@mui/icons-material": "catalog:",
+    "@mui/material": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@joyfui/typescript-config": "workspace:*",
+    "@types/node": "^26.6.2",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.1"
+  }
+}

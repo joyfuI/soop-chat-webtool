@@ -1,0 +1,15 @@
+<svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <title>Chat Collector</title>
+  <rect fill="#315be8" height="40" rx="8" width="40" />
+  <text
+    fill="white"
+    font-family="sans-serif"
+    font-size="28"
+    font-weight="700"
+    text-anchor="middle"
+    x="20"
+    y="29"
+  >
+    C
+  </text>
+</svg>

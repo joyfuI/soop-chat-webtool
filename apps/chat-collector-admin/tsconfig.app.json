@@ -1,0 +1,5 @@
+{
+  "extends": "@joyfui/typescript-config/react.json",
+  "compilerOptions": { "types": ["vite/client"] },
+  "include": ["src"]
+}

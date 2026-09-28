@@ -1,0 +1,7 @@
+{
+  "extends": ["//"],
+  "tasks": {
+    "build": { "env": ["VITE_COLLECTOR_API_URL", "VITE_COLLECTOR_API_KEY"] },
+    "dev": { "env": ["VITE_COLLECTOR_API_URL", "VITE_COLLECTOR_API_KEY"] }
+  }
+}
