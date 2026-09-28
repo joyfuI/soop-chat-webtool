@@ -343,10 +343,7 @@ export async function buildApp(options: {
         return reply.code(204).send();
       },
     );
-    app.get<{
-      Params: BroadcastParams;
-      Querystring: { format: 'sqlite' | 'csv' };
-    }>(
+    app.get<{ Params: BroadcastParams; Querystring: { format: 'db' | 'csv' } }>(
       '/api/broadcasts/:broadcastNo/download',
       {
         schema: {
@@ -355,7 +352,7 @@ export async function buildApp(options: {
             type: 'object',
             additionalProperties: false,
             required: ['format'],
-            properties: { format: { type: 'string', enum: ['sqlite', 'csv'] } },
+            properties: { format: { type: 'string', enum: ['db', 'csv'] } },
           },
         },
       },
@@ -363,7 +360,7 @@ export async function buildApp(options: {
         const broadcast = store.findBroadcast(request.params.broadcastNo);
         const format = request.query.format;
         const stream =
-          format === 'sqlite'
+          format === 'db'
             ? sqliteDownload(store, broadcast)
             : csvDownload(store, broadcast);
         streams.add(stream);

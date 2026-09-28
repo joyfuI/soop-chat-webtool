@@ -1645,6 +1645,10 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
   f.store.saveEvent('user123', '1002', event('unknown'));
   const csv = await f.call('GET', '/api/broadcasts/1001/download?format=csv');
   assert.equal(csv.statusCode, 200);
+  assert.equal(
+    csv.headers['content-disposition'],
+    'attachment; filename="user123-1001.csv"',
+  );
   assert.ok(
     csv.body.startsWith(
       '\uFEFFid,broadcast_no,type,opcode,received_at,data,raw_flags,raw_payload\r\n',
@@ -1653,12 +1657,13 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
   assert.ok(csv.body.includes('AAz/QQ=='));
   assert.ok(csv.body.includes('한글'));
   assert.ok(csv.body.includes('""message""'));
-  const result = await f.call(
-    'GET',
-    '/api/broadcasts/1001/download?format=sqlite',
-  );
+  const result = await f.call('GET', '/api/broadcasts/1001/download?format=db');
   assert.equal(result.statusCode, 200);
-  const download = join(f.dataDir, 'download.sqlite');
+  assert.equal(
+    result.headers['content-disposition'],
+    'attachment; filename="user123-1001.db"',
+  );
+  const download = join(f.dataDir, 'download.db');
   writeFileSync(download, result.rawPayload);
   const db = new DatabaseSync(download, { readOnly: true });
   try {
@@ -1733,11 +1738,12 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
   const csvClose = once(cancelledCsv, 'close');
   cancelledCsv.destroy();
   await csvClose;
-  assert.equal(
-    (await f.call('GET', '/api/broadcasts/1001/download?format=json'))
-      .statusCode,
-    400,
-  );
+  for (const format of ['json', 'sqlite'])
+    assert.equal(
+      (await f.call('GET', `/api/broadcasts/1001/download?format=${format}`))
+        .statusCode,
+      400,
+    );
 });
 
 test('SELECT API supports CTE/JOIN/aggregates and rejects mutations, multiple statements and duplicate names', async (t) => {

@@ -115,7 +115,7 @@ Node의 내장 TypeScript 실행은 타입을 제거하고 실행하며 타입 �
 | GET | `/api/broadcasts` | 등록 해제된 대상까지 포함한 전체 방송 |
 | GET | `/api/broadcasts/:streamerId` | 해당 스트리머의 전체 방송 |
 | DELETE | `/api/broadcasts/:broadcastNo` | 방송·관련 이벤트 삭제, 204 |
-| GET | `/api/broadcasts/:broadcastNo/download?format=sqlite` | 특정 방송의 독립 SQLite 파일 |
+| GET | `/api/broadcasts/:broadcastNo/download?format=db` | 특정 방송의 독립 SQLite 파일 (`.db`) |
 | GET | `/api/broadcasts/:broadcastNo/download?format=csv` | 특정 방송의 CSV |
 | POST | `/api/query/:streamerId` | `{ "sql": "SELECT ..." }` |
 
