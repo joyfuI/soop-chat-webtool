@@ -1,14 +1,8 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import {
-  mkdtempSync,
-  readdirSync,
-  rmdirSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { setImmediate, setTimeout } from 'node:timers/promises';
@@ -153,14 +147,13 @@ async function fixture(
   const context = await open();
   t.after(async () => {
     for (const current of contexts.reverse()) await current.app.close();
-    for (const name of readdirSync(dataDir)) {
-      try {
-        unlinkSync(join(dataDir, name));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
-    }
-    rmdirSync(dataDir);
+    assert.equal(dirname(resolve(dataDir)), resolve(tmpdir()));
+    rmSync(dataDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
   });
   return {
     ...context,
@@ -985,7 +978,7 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   t.mock.timers.reset();
 });
 
-test('restricted broadcasts wait for a new number; settings preserve the block and stop/start retries the same broadcast', async (t) => {
+test('restricted broadcasts wait for a new number; settings preserve the block and start retries the same broadcast', async (t) => {
   for (const reason of [
     'password',
     'subscriptionPlus',
@@ -1119,7 +1112,6 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
         f.collector.status(f.store.getStreamer('user123')).lastError?.code,
         'RESTRICTED_ROOM',
       );
-      await f.call('POST', '/api/collection/stop/user123');
       await f.call('POST', '/api/collection/start/user123');
       await flush();
       assert.equal(liveRequests, 2);
@@ -1175,6 +1167,108 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
       assert.equal(liveRequests, 4);
     });
   }
+});
+
+test('start APIs cancel a blocked poll, preserve broadcast history and keep connecting or collecting runners', async (t) => {
+  let denied = true;
+  let calls = 0;
+  let broadcastNo = '1001';
+  let pollSignal: AbortSignal | undefined;
+  let resolveConnection:
+    | ((value: ReturnType<typeof channel>) => void)
+    | undefined;
+  let polls = 0;
+  const f = await fixture(
+    t,
+    async (id) => {
+      if (id === 'other123') return channel('1002');
+      if (++calls === 1) return channel();
+      if (denied) throw new RestrictedRoomError('adult');
+      return new Promise((resolve) => {
+        resolveConnection = resolve;
+      });
+    },
+    [],
+    (id, signal) => {
+      if (id === 'other123') return Promise.resolve('1002');
+      if (++polls !== 3) return Promise.resolve(broadcastNo);
+      pollSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    },
+  );
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const id of ['user123', 'other123'])
+    await f.call('POST', '/api/streamers', { streamerId: id });
+  await f.call('POST', '/api/collection/start');
+  await flush();
+  const blocked = f.chats.find((chat) => chat.streamerId === 'user123');
+  const healthy = f.chats.find((chat) => chat.streamerId === 'other123');
+  assert.ok(blocked && healthy);
+  const firstCollectedAt = f.store.findBroadcast('1001').first_collected_at;
+  blocked.transition('closed');
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).lastError?.code,
+    'RESTRICTED_ROOM',
+  );
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(pollSignal?.aborted, false);
+  denied = false;
+  broadcastNo = '1003';
+  const started = await f.call('POST', '/api/collection/start');
+  assert.equal(started.statusCode, 200);
+  await flush();
+  assert.equal(pollSignal?.aborted, true);
+  assert.equal(blocked.disconnections, 1);
+  assert.equal(healthy.disconnections, 0);
+  assert.equal(healthy.connections, 1);
+  assert.equal(f.chats.length, 3);
+  assert.equal(f.store.getStreamer('user123').enabled, 1);
+  const retry = f.chats[2];
+  assert.ok(retry);
+  assert.equal(retry.connections, 1);
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'connecting',
+  );
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).lastError,
+    null,
+  );
+  assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
+  await Promise.all([
+    f.call('POST', '/api/collection/start/USER123'),
+    f.call('POST', '/api/collection/start'),
+  ]);
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(f.chats.length, 3);
+  assert.equal(polls, 4);
+  assert.ok(resolveConnection);
+  resolveConnection(channel('1003'));
+  await flush();
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'collecting',
+  );
+  assert.equal(f.store.findBroadcast('1001').event_count, 1);
+  assert.ok(f.store.findBroadcast('1001').ended_at);
+  assert.equal(f.store.findBroadcast('1003').event_count, 1);
+  assert.equal(
+    f.store.findBroadcast('1001').first_collected_at,
+    firstCollectedAt,
+  );
+  await f.call('POST', '/api/collection/start');
+  await flush();
+  assert.equal(f.chats.length, 3);
+  assert.equal(retry.connections, 1);
+  assert.equal(retry.disconnections, 0);
 });
 
 test('ordinary connection failures retry at 10 seconds; one restricted streamer does not block another', async (t) => {
@@ -1729,10 +1823,11 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
   aborted.destroy();
   await close;
   assert.deepEqual(
-    readdirSync(tmpdir()).filter((name) =>
-      name.startsWith('soop-chat-collector-'),
+    readdirSync(tmpdir()).filter(
+      (name) =>
+        name.startsWith('soop-chat-collector-') && !before.includes(name),
     ),
-    before,
+    [],
   );
   const cancelledCsv = csvDownload(f.store, f.store.findBroadcast('1001'));
   const csvClose = once(cancelledCsv, 'close');

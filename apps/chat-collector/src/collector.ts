@@ -157,8 +157,12 @@ export class Collector {
   start(streamer: Streamer, lastBroadcastNo: string | null = null) {
     if (this.closing) return;
     const previous = this.runners.get(streamer.streamer_id);
-    if (previous?.active && !previous.fatal) return;
-    if (previous) this.dispose(previous);
+    if (previous?.active && !previous.fatal && !previous.blockedBroadcastNo)
+      return;
+    if (previous) {
+      lastBroadcastNo ??= previous.lastBroadcastNo;
+      this.dispose(previous);
+    }
     const runner: Runner = {
       streamer,
       chat: undefined as unknown as ReturnType<ChatFactory>,
