@@ -2,51 +2,29 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { RawPacket } from 'soop-chat';
 
-export const DAY_MS = 86_400_000;
-export const MAX_RETENTION_DAYS = Math.floor(Number.MAX_SAFE_INTEGER / DAY_MS);
+import {
+  ApiError,
+  type Broadcast,
+  compareBroadcasts,
+  MAX_RETENTION_DAYS,
+  type StoredEvent,
+  type Streamer,
+} from './types.ts';
+
+export {
+  ApiError,
+  type Broadcast,
+  DAY_MS,
+  MAX_RETENTION_DAYS,
+  type StoredEvent,
+  type Streamer,
+} from './types.ts';
 
 function validateRetentionDays(days: number) {
   if (!Number.isSafeInteger(days) || days < 0 || days > MAX_RETENTION_DAYS)
     throw new ApiError(400, '채팅 보존 일수가 올바르지 않습니다.');
 }
-
-export class ApiError extends Error {
-  readonly statusCode: number;
-
-  constructor(statusCode: number, message: string) {
-    super(message);
-    this.statusCode = statusCode;
-  }
-}
-
-export type Streamer = {
-  streamer_id: string;
-  room_password: string | null;
-  retention_days: number;
-  registered: number;
-  enabled: number;
-  created_at: number;
-  updated_at: number;
-};
-
-export type Broadcast = {
-  broadcast_no: string;
-  streamer_id: string;
-  first_collected_at: number;
-  last_collected_at: number;
-  ended_at: number | null;
-  event_count: number;
-};
-
-export type StoredEvent = {
-  type: string;
-  opcode: string;
-  receivedAt: number;
-  data: unknown;
-  raw: Pick<RawPacket, 'flags' | 'payload'>;
-};
 
 export const broadcastSchema = `
   CREATE TABLE IF NOT EXISTS broadcasts (
@@ -76,6 +54,7 @@ export const broadcastSchema = `
 `;
 
 export function configureDatabase(db: DatabaseSync) {
+  db.exec('PRAGMA busy_timeout = 5000');
   const previous = db.prepare('PRAGMA auto_vacuum').get()?.auto_vacuum;
   db.exec('PRAGMA auto_vacuum = FULL');
   if (
@@ -88,7 +67,6 @@ export function configureDatabase(db: DatabaseSync) {
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = FULL;
     PRAGMA foreign_keys = ON;
-    PRAGMA busy_timeout = 5000;
     PRAGMA wal_autocheckpoint = 1000;
   `);
 }
@@ -132,19 +110,25 @@ export function initializeSettings(db: DatabaseSync) {
   ).run(Date.now());
 }
 
+export function deleteStoredBroadcast(db: DatabaseSync, broadcastNo: string) {
+  const deleted = db
+    .prepare('DELETE FROM broadcasts WHERE broadcast_no = ?')
+    .run(broadcastNo);
+  if (!deleted.changes) throw new ApiError(404, '방송을 찾을 수 없습니다.');
+  // Readers may defer truncation; deleted pages remain reusable in the meantime.
+  db.exec('PRAGMA busy_timeout = 0');
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } finally {
+    db.exec('PRAGMA busy_timeout = 5000');
+  }
+}
+
 export class Store {
   readonly dataDir: string;
   readonly settings: DatabaseSync;
   readonly secretKey: Buffer;
-  readonly databases = new Map<
-    string,
-    {
-      streamerId: string;
-      db: DatabaseSync;
-      broadcast: ReturnType<DatabaseSync['prepare']>;
-      event: ReturnType<DatabaseSync['prepare']>;
-    }
-  >();
+  readonly databases = new Map<string, StreamerStore>();
 
   constructor(settings: DatabaseSync, dataDir: string, secretKey: Buffer) {
     this.settings = settings;
@@ -169,11 +153,7 @@ export class Store {
     return row;
   }
 
-  addStreamer(
-    id: string,
-    password: string | null,
-    retentionDays?: number,
-  ): Streamer {
+  prepareStreamer(id: string, retentionDays?: number) {
     if (!/^[A-Za-z0-9]{6,12}$/.test(id))
       throw new ApiError(400, '스트리머 ID가 올바르지 않습니다.');
     const previous = this.settings
@@ -184,7 +164,18 @@ export class Store {
     const canonical = previous?.streamer_id ?? id;
     const days = retentionDays ?? previous?.retention_days ?? 0;
     validateRetentionDays(days);
-    this.getDatabase(canonical);
+    return { streamerId: canonical, retentionDays: days };
+  }
+
+  addStreamer(
+    id: string,
+    password: string | null,
+    retentionDays?: number,
+  ): Streamer {
+    const { streamerId: canonical, retentionDays: days } = this.prepareStreamer(
+      id,
+      retentionDays,
+    );
     const now = Date.now();
     this.settings
       .prepare(`
@@ -288,78 +279,28 @@ export class Store {
   }
 
   getDatabase(id: string): DatabaseSync {
-    if (!/^[A-Za-z0-9]{6,12}$/.test(id))
-      throw new ApiError(400, '스트리머 ID가 올바르지 않습니다.');
+    return this.getStreamerStore(id).db;
+  }
+
+  private getStreamerStore(id: string) {
     const cacheKey = id.toLowerCase();
     let entry = this.databases.get(cacheKey);
     if (!entry) {
-      const canonical = this.settings
-        .prepare('SELECT streamer_id FROM streamers WHERE streamer_id = ?')
-        .get(id)?.streamer_id as string | undefined;
-      mkdirSync(this.dataDir, { recursive: true });
-      const db = new DatabaseSync(join(this.dataDir, `${canonical ?? id}.db`));
-      try {
-        configureDatabase(db);
-        db.exec(broadcastSchema);
-        entry = {
-          streamerId: canonical ?? id,
-          db,
-          broadcast: db.prepare(`
-            INSERT INTO broadcasts VALUES (?, ?, ?, ?, NULL, 1)
-            ON CONFLICT(broadcast_no) DO UPDATE SET
-              first_collected_at = MIN(first_collected_at, excluded.first_collected_at),
-              last_collected_at = MAX(last_collected_at, excluded.last_collected_at),
-              ended_at = NULL, event_count = event_count + 1
-          `),
-          event: db.prepare(
-            'INSERT INTO events (broadcast_no, type, opcode, received_at, data, raw_flags, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          ),
-        };
-        this.databases.set(cacheKey, entry);
-      } catch (error) {
-        db.close();
-        throw error;
-      }
+      entry = new StreamerStore(
+        this.dataDir,
+        this.getStreamer(id, false).streamer_id,
+      );
+      this.databases.set(cacheKey, entry);
     }
-    return entry.db;
+    return entry;
   }
 
   saveEvent(id: string, broadcastNo: string, event: StoredEvent) {
-    const db = this.getDatabase(id);
-    const entry = this.databases.get(id.toLowerCase());
-    if (!entry) throw new Error('방송 DB가 열려 있지 않습니다.');
-    const data = JSON.stringify(event.data);
-    if (data === undefined) throw new Error('이벤트 데이터가 없습니다.');
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      entry.broadcast.run(
-        broadcastNo,
-        entry.streamerId,
-        event.receivedAt,
-        event.receivedAt,
-      );
-      entry.event.run(
-        broadcastNo,
-        event.type,
-        event.opcode,
-        event.receivedAt,
-        data,
-        event.raw.flags,
-        event.raw.payload,
-      );
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
+    this.getStreamerStore(id).saveEvent(broadcastNo, event);
   }
 
   markEnded(id: string, broadcastNo: string) {
-    this.getDatabase(id)
-      .prepare(
-        'UPDATE broadcasts SET ended_at = ? WHERE broadcast_no = ? AND ended_at IS NULL',
-      )
-      .run(Date.now(), broadcastNo);
+    this.getStreamerStore(id).markEnded(broadcastNo);
   }
 
   listBroadcasts(id?: string): Broadcast[] {
@@ -367,26 +308,18 @@ export class Store {
       ? [this.getStreamer(id, false)]
       : this.listStreamers(false);
     return streamers
-      .flatMap(
-        (streamer) =>
-          this.getDatabase(streamer.streamer_id)
-            .prepare('SELECT * FROM broadcasts')
-            .all() as Broadcast[],
+      .flatMap((streamer) =>
+        this.getStreamerStore(streamer.streamer_id).listBroadcasts(),
       )
-      .sort(
-        (a, b) =>
-          b.first_collected_at - a.first_collected_at ||
-          a.streamer_id.localeCompare(b.streamer_id) ||
-          a.broadcast_no.localeCompare(b.broadcast_no),
-      );
+      .sort(compareBroadcasts);
   }
 
   findBroadcast(broadcastNo: string): Broadcast {
     const matches: Broadcast[] = [];
     for (const streamer of this.listStreamers(false)) {
-      const row = this.getDatabase(streamer.streamer_id)
-        .prepare('SELECT * FROM broadcasts WHERE broadcast_no = ?')
-        .get(broadcastNo) as Broadcast | undefined;
+      const row = this.getStreamerStore(streamer.streamer_id).findBroadcast(
+        broadcastNo,
+      );
       if (row) matches.push(row);
     }
     if (!matches.length) throw new ApiError(404, '방송을 찾을 수 없습니다.');
@@ -396,29 +329,109 @@ export class Store {
   }
 
   listExpiredBroadcasts(id: string, cutoff: number): Broadcast[] {
-    return this.getDatabase(id)
+    return this.getStreamerStore(id).listExpiredBroadcasts(cutoff);
+  }
+
+  deleteBroadcast(broadcast: Broadcast) {
+    deleteStoredBroadcast(
+      this.getDatabase(broadcast.streamer_id),
+      broadcast.broadcast_no,
+    );
+  }
+
+  close() {
+    for (const store of this.databases.values()) store.close();
+    this.databases.clear();
+  }
+}
+
+export class StreamerStore {
+  readonly streamerId: string;
+  readonly db: DatabaseSync;
+  private readonly broadcast: ReturnType<DatabaseSync['prepare']>;
+  private readonly event: ReturnType<DatabaseSync['prepare']>;
+
+  constructor(dataDir: string, streamerId: string) {
+    if (!/^[A-Za-z0-9]{6,12}$/.test(streamerId))
+      throw new ApiError(400, '스트리머 ID가 올바르지 않습니다.');
+    this.streamerId = streamerId;
+    mkdirSync(dataDir, { recursive: true });
+    this.db = new DatabaseSync(join(dataDir, `${streamerId}.db`));
+    try {
+      configureDatabase(this.db);
+      this.db.exec(broadcastSchema);
+      this.broadcast = this.db.prepare(`
+        INSERT INTO broadcasts VALUES (?, ?, ?, ?, NULL, 1)
+        ON CONFLICT(broadcast_no) DO UPDATE SET
+          first_collected_at = MIN(first_collected_at, excluded.first_collected_at),
+          last_collected_at = MAX(last_collected_at, excluded.last_collected_at),
+          ended_at = NULL, event_count = event_count + 1
+      `);
+      this.event = this.db.prepare(
+        'INSERT INTO events (broadcast_no, type, opcode, received_at, data, raw_flags, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      );
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+  }
+
+  saveEvent(broadcastNo: string, event: StoredEvent) {
+    const data = JSON.stringify(event.data);
+    if (data === undefined) throw new Error('이벤트 데이터가 없습니다.');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.broadcast.run(
+        broadcastNo,
+        this.streamerId,
+        event.receivedAt,
+        event.receivedAt,
+      );
+      this.event.run(
+        broadcastNo,
+        event.type,
+        event.opcode,
+        event.receivedAt,
+        data,
+        event.raw.flags,
+        event.raw.payload,
+      );
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  markEnded(broadcastNo: string) {
+    this.db
+      .prepare(
+        'UPDATE broadcasts SET ended_at = ? WHERE broadcast_no = ? AND ended_at IS NULL',
+      )
+      .run(Date.now(), broadcastNo);
+  }
+
+  listBroadcasts(): Broadcast[] {
+    return (
+      this.db.prepare('SELECT * FROM broadcasts').all() as Broadcast[]
+    ).sort(compareBroadcasts);
+  }
+
+  findBroadcast(broadcastNo: string): Broadcast | undefined {
+    return this.db
+      .prepare('SELECT * FROM broadcasts WHERE broadcast_no = ?')
+      .get(broadcastNo) as Broadcast | undefined;
+  }
+
+  listExpiredBroadcasts(cutoff: number): Broadcast[] {
+    return this.db
       .prepare(
         'SELECT * FROM broadcasts WHERE first_collected_at <= ? ORDER BY first_collected_at ASC, broadcast_no ASC',
       )
       .all(cutoff) as Broadcast[];
   }
 
-  deleteBroadcast(broadcast: Broadcast) {
-    const db = this.getDatabase(broadcast.streamer_id);
-    db.prepare('DELETE FROM broadcasts WHERE broadcast_no = ?').run(
-      broadcast.broadcast_no,
-    );
-    // Readers may defer truncation; deleted pages remain reusable in the meantime.
-    db.exec('PRAGMA busy_timeout = 0');
-    try {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-    } finally {
-      db.exec('PRAGMA busy_timeout = 5000');
-    }
-  }
-
   close() {
-    for (const { db } of this.databases.values()) db.close();
-    this.databases.clear();
+    this.db.close();
   }
 }

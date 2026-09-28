@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { type TestContext, test } from 'node:test';
 import { setImmediate, setTimeout } from 'node:timers/promises';
+import type { Worker } from 'node:worker_threads';
 import {
   BroadcastOfflineError,
   type ChannelResolver,
@@ -21,13 +22,21 @@ import {
 } from 'soop-chat';
 
 import { buildApp } from '../src/app.ts';
+import type { AsyncStore } from '../src/async-store.ts';
 import type { BroadcastLookup } from '../src/collector.ts';
-import { csvDownload, sqliteDownload } from '../src/download.ts';
+import { downloadBroadcast } from '../src/download.ts';
+import { csvDownload, sqliteDownload } from '../src/download-source.ts';
 import { runQuery } from '../src/query.ts';
-import { DAY_MS, MAX_RETENTION_DAYS } from '../src/storage.ts';
+import {
+  DAY_MS,
+  initializeSettings,
+  MAX_RETENTION_DAYS,
+  Store,
+} from '../src/storage.ts';
 
 const headers = { authorization: 'Bearer test-api-key' };
 const key = Buffer.alloc(32, 7);
+const stores = new Set<AsyncStore>();
 const channel = (broadcastNo = '1001') => ({
   broadcastNo,
   chatNo: '1',
@@ -142,7 +151,16 @@ async function fixture(
   const open = async () => {
     const context = await buildApp(options);
     contexts.push(context);
-    return context;
+    const settings = new DatabaseSync(join(dataDir, '_settings.db'));
+    initializeSettings(settings);
+    const inspector = new Store(settings, dataDir, key);
+    stores.add(context.store);
+    context.app.addHook('onClose', async () => {
+      inspector.close();
+      settings.close();
+      stores.delete(context.store);
+    });
+    return { ...context, backend: context.store, store: inspector };
   };
   const context = await open();
   t.after(async () => {
@@ -174,9 +192,291 @@ async function fixture(
   };
 }
 
-async function flush(turns = 2) {
-  for (let turn = 0; turn < turns; turn++) await setImmediate();
+async function flush(turns = 6) {
+  for (let turn = 0; turn < turns; turn++) {
+    await setImmediate();
+    await Promise.all([...stores].map((store) => store.flush()));
+    await setImmediate();
+  }
 }
+
+test('blocked SQLite writes keep control APIs responsive and stop drains ordered event snapshots', {
+  timeout: 10_000,
+}, async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/streamers', { streamerId: 'other123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  const previous = f.store.findBroadcast('1001').event_count;
+  const db = f.store.getDatabase('user123');
+  db.exec('BEGIN IMMEDIATE');
+  let stopped = false;
+  let stopping: ReturnType<typeof f.call> | undefined;
+  const started = Date.now();
+  try {
+    for (let index = 0; index < 200; index++) {
+      const incoming = event();
+      incoming.raw.payload[0] = index;
+      chat.emit('event', incoming);
+      incoming.raw.payload[0] = 255;
+    }
+    const responses = await Promise.all([
+      f.call('GET', '/api/streamers'),
+      f.call('GET', '/api/settings'),
+      f.call('GET', '/api/broadcasts/other123'),
+      f.call('POST', '/api/collection/start/user123'),
+      f.call('POST', '/api/collection/stop/other123'),
+    ]);
+    for (const response of responses) assert.equal(response.statusCode, 200);
+    assert.ok(
+      Date.now() - started < 1500,
+      'control APIs must finish while the DB write lock is held',
+    );
+    assert.equal(f.chats.length, 1);
+    stopping = f.call('POST', '/api/collection/stop/user123');
+    void stopping.then(() => {
+      stopped = true;
+    });
+    await setTimeout(100);
+    assert.equal(stopped, false);
+    assert.equal(f.store.findBroadcast('1001').event_count, previous);
+  } finally {
+    db.exec('ROLLBACK');
+  }
+  assert.equal((await stopping)?.statusCode, 200);
+  assert.equal(f.store.findBroadcast('1001').event_count, previous + 200);
+  const rows = db
+    .prepare('SELECT raw_payload FROM events ORDER BY id')
+    .all()
+    .slice(previous);
+  assert.deepEqual(
+    rows.map((row) => (row.raw_payload as Uint8Array)[0]),
+    Array.from({ length: 200 }, (_, index) => index),
+  );
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const beforeShutdown = f.store.findBroadcast('1001').event_count;
+  for (let index = 0; index < 100; index++)
+    f.chats.at(-1)?.emit('event', event());
+  const path = f.store.databasePath('user123');
+  await f.app.close();
+  const reader = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal(
+      reader.prepare('SELECT event_count FROM broadcasts').get()?.event_count,
+      beforeShutdown + 100,
+    );
+  } finally {
+    reader.close();
+  }
+});
+
+test('streamer workers isolate locked writes and crashes, reuse case aliases, and recover on retry', {
+  timeout: 10_000,
+}, async (t) => {
+  const broadcastNo = (id: string) => (id === 'alpha123' ? '1001' : '1002');
+  const f = await fixture(
+    t,
+    async (id) => channel(broadcastNo(id)),
+    [],
+    async (id) => broadcastNo(id),
+  );
+  for (const streamerId of ['alpha123', 'beta123'])
+    assert.equal(
+      (await f.call('POST', '/api/streamers', { streamerId })).statusCode,
+      201,
+    );
+  await f.call('POST', '/api/collection/start');
+  await flush();
+  const alpha = f.chats.find((chat) => chat.streamerId === 'alpha123');
+  const beta = f.chats.find((chat) => chat.streamerId === 'beta123');
+  assert.ok(alpha && beta);
+  const workers = Reflect.get(f.backend, 'streamers') as Map<
+    string,
+    Promise<{ worker: Worker; call(method: string): Promise<unknown> }>
+  >;
+  const alphaWorker = await workers.get('alpha123');
+  const betaWorker = await workers.get('beta123');
+  assert.ok(alphaWorker && betaWorker);
+  assert.notEqual(alphaWorker.worker.threadId, betaWorker.worker.threadId);
+  assert.equal(
+    (await f.call('GET', '/api/broadcasts/ALPHA123')).statusCode,
+    200,
+  );
+  assert.equal(workers.size, 2);
+  await assert.rejects(
+    alphaWorker.call('getCredentials'),
+    (error: unknown) => (error as { statusCode: number }).statusCode === 400,
+  );
+  const db = f.store.getDatabase('alpha123');
+  const alphaCount = f.store.findBroadcast('1001').event_count;
+  const betaCount = f.store.findBroadcast('1002').event_count;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (let index = 0; index < 20; index++) {
+      alpha.emit('event', event());
+      beta.emit('event', event());
+    }
+    await f.backend.waitForWrites('beta123');
+    assert.equal(f.store.findBroadcast('1001').event_count, alphaCount);
+    assert.equal(f.store.findBroadcast('1002').event_count, betaCount + 20);
+    const response = await f.call('GET', '/api/broadcasts/beta123');
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json()[0].event_count, betaCount + 20);
+    assert.equal((await f.call('GET', '/api/streamers')).statusCode, 200);
+  } finally {
+    db.exec('ROLLBACK');
+  }
+  await f.backend.waitForWrites('alpha123');
+  assert.equal(f.store.findBroadcast('1001').event_count, alphaCount + 20);
+
+  const exited = new Promise<void>((resolve) =>
+    alphaWorker.worker.once('exit', () => resolve()),
+  );
+  // An invalid message causes a real worker failure before the queued event.
+  alphaWorker.worker.postMessage(null);
+  alpha.emit('event', event());
+  beta.emit('event', event());
+  await Promise.all([
+    f.backend.waitForWrites('alpha123'),
+    f.backend.waitForWrites('beta123'),
+    exited,
+  ]);
+  const states = (await f.call('GET', '/api/streamers')).json();
+  assert.equal(states[0].lastError.code, 'STORAGE_ERROR');
+  assert.equal(states[1].state, 'collecting');
+  assert.equal((await f.call('GET', '/api/settings')).statusCode, 200);
+  assert.equal(f.store.findBroadcast('1002').event_count, betaCount + 21);
+  assert.equal(workers.has('alpha123'), false);
+  assert.equal(
+    (await f.call('POST', '/api/collection/start/alpha123')).statusCode,
+    200,
+  );
+  await flush();
+  const recovered = await workers.get('alpha123');
+  assert.ok(recovered);
+  assert.notEqual(recovered.worker, alphaWorker.worker);
+  assert.equal(await workers.get('beta123'), betaWorker);
+  assert.equal(f.store.findBroadcast('1001').event_count, alphaCount + 21);
+  assert.equal(
+    (await f.call('GET', '/api/streamers')).json()[0].state,
+    'collecting',
+  );
+});
+
+test('deletion waits outside the main thread, serializes writes, and exports cancel without temporary files', {
+  timeout: 10_000,
+}, async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.backend.saveEvent('user123', 'old', event());
+  const broadcast = await f.backend.findBroadcast('old');
+  const path = await f.backend.databasePath('user123');
+  const db = f.store.getDatabase('user123');
+  db.exec('BEGIN IMMEDIATE');
+  const controller = new AbortController();
+  const deleting = f.backend.deleteBroadcast(broadcast, controller.signal);
+  const cancellation = assert.rejects(
+    deleting,
+    (error: unknown) => (error as { statusCode: number }).statusCode === 499,
+  );
+  const writing = f.backend.saveEvent('user123', 'new', event());
+  let written = false;
+  void writing.then(() => {
+    written = true;
+  });
+  try {
+    await setTimeout(250);
+    assert.equal((await f.call('GET', '/api/streamers')).statusCode, 200);
+    assert.equal(written, false);
+    controller.abort();
+    await cancellation;
+  } finally {
+    db.exec('ROLLBACK');
+  }
+  await writing;
+  assert.equal(f.store.findBroadcast('old').event_count, 1);
+  assert.equal(f.store.findBroadcast('new').event_count, 1);
+  await f.backend.deleteBroadcast(broadcast);
+  assert.throws(() => f.store.findBroadcast('old'), /방송을 찾을 수 없습니다/);
+  const before = readdirSync(tmpdir()).filter((name) =>
+    name.startsWith('soop-chat-collector-'),
+  );
+  const cancelled = new AbortController();
+  const preparing = downloadBroadcast(
+    path,
+    f.store.findBroadcast('new'),
+    'db',
+    cancelled.signal,
+  );
+  const rejection = assert.rejects(preparing);
+  cancelled.abort();
+  await rejection;
+  const download = await downloadBroadcast(
+    path,
+    f.store.findBroadcast('new'),
+    'db',
+    new AbortController().signal,
+  );
+  download.stream.destroy();
+  await download.finished;
+  const csv = await downloadBroadcast(
+    path,
+    f.store.findBroadcast('new'),
+    'csv',
+    new AbortController().signal,
+  );
+  csv.stream.destroy();
+  await csv.finished;
+  // Keep native export queries running so cancellation must stop the process.
+  db.exec(`
+    ALTER TABLE events RENAME TO saved_events;
+    CREATE VIEW events AS
+    WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id + 1 FROM n)
+    SELECT n.id, e.broadcast_no, e.type, e.opcode, e.received_at, e.data, e.raw_flags, e.raw_payload
+    FROM n CROSS JOIN saved_events e;
+  `);
+  const nativeCancellation = new AbortController();
+  const exporting = downloadBroadcast(
+    path,
+    f.store.findBroadcast('new'),
+    'db',
+    nativeCancellation.signal,
+  );
+  const nativeRejection = assert.rejects(
+    exporting,
+    (error: unknown) => (error as { statusCode: number }).statusCode === 499,
+  );
+  await setTimeout(400);
+  assert.equal((await f.call('GET', '/api/streamers')).statusCode, 200);
+  nativeCancellation.abort();
+  await nativeRejection;
+  const streaming = new AbortController();
+  const liveCsv = await downloadBroadcast(
+    path,
+    f.store.findBroadcast('new'),
+    'csv',
+    streaming.signal,
+  );
+  await once(liveCsv.stream, 'data');
+  const csvError = assert.rejects(
+    once(liveCsv.stream, 'end'),
+    (error: unknown) => (error as { statusCode: number }).statusCode === 499,
+  );
+  streaming.abort();
+  await csvError;
+  await liveCsv.finished;
+  assert.deepEqual(
+    readdirSync(tmpdir()).filter(
+      (name) =>
+        name.startsWith('soop-chat-collector-') && !before.includes(name),
+    ),
+    [],
+  );
+});
 
 test('CORS preflight, allowed origins and API authentication', async (t) => {
   const origin = 'http://localhost:5173';
@@ -809,7 +1109,9 @@ test('retention failure leaves collection state unchanged and retries next day w
   f.store.saveEvent('failed1', 'failed', event('chatMessage', now - DAY_MS));
   f.store.saveEvent('other123', 'other', event('chatMessage', now - DAY_MS));
   const blocked = f.store.getDatabase('failed1');
-  blocked.exec('PRAGMA query_only = ON');
+  blocked.exec(
+    "CREATE TRIGGER fail_delete BEFORE DELETE ON broadcasts BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+  );
   const logged = t.mock.method(f.app.log, 'error', () => {});
   await f.app.ready();
   await flush();
@@ -823,7 +1125,7 @@ test('retention failure leaves collection state unchanged and retries next day w
   );
   assert.equal(f.store.findBroadcast('failed').event_count, 1);
   assert.deepEqual(f.store.listBroadcasts('other123'), []);
-  blocked.exec('PRAGMA query_only = OFF');
+  blocked.exec('DROP TRIGGER fail_delete');
   t.mock.timers.tick(DAY_MS);
   await flush();
   assert.deepEqual(f.store.listBroadcasts(), []);
@@ -848,23 +1150,41 @@ test('retention yields between broadcasts, rechecks registration, does not overl
       event('chatMessage', now - DAY_MS),
     );
   }
-  const original = f.store.deleteBroadcast.bind(f.store);
-  const deletions = t.mock.method(f.store, 'deleteBroadcast', (broadcast) => {
-    assert.equal(f.store.settings.isOpen, true);
-    original(broadcast);
-    if (broadcast.streamer_id === 'archive1')
-      queueMicrotask(() => f.store.removeStreamer('archive1'));
+  const original = f.backend.deleteBroadcast.bind(f.backend);
+  let firstDeleted!: () => void;
+  const firstDeletion = new Promise<void>((resolve) => {
+    firstDeleted = resolve;
   });
+  let release!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const deletions = t.mock.method(
+    f.backend,
+    'deleteBroadcast',
+    async (broadcast, signal) => {
+      assert.equal(f.store.settings.isOpen, true);
+      await original(broadcast, signal);
+      if (broadcast.streamer_id === 'archive1') {
+        await f.backend.removeStreamer('archive1');
+        firstDeleted();
+        await paused;
+      }
+    },
+  );
   await f.app.ready();
+  await firstDeletion;
   const initial = deletions.mock.callCount();
   assert.equal(initial, 1);
   t.mock.timers.tick(2 * DAY_MS);
   assert.equal(deletions.mock.callCount(), initial);
-  await flush();
+  await f.call('GET', '/api/streamers');
   assert.equal(f.store.listBroadcasts('archive1').length, 19);
-  assert.ok(deletions.mock.callCount() > initial);
   const databasePath = f.store.databasePath('user123');
-  await f.app.close();
+  const closed = f.app.close();
+  await setImmediate();
+  release();
+  await closed;
   const completed = deletions.mock.callCount();
   assert.ok(completed < 21);
   assert.equal(f.store.settings.isOpen, false);
@@ -914,6 +1234,7 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
     error: new ProtocolError('bad packet'),
     raw: unknown.raw,
   });
+  await flush();
   const db = f.store.getDatabase('user123');
   assert.equal(
     db.prepare('SELECT COUNT(*) AS count FROM events').get()?.count,
@@ -944,12 +1265,14 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   await flush();
   assert.equal(calls, 2);
   chat.end();
+  await flush();
   assert.ok(f.store.findBroadcast('1001').ended_at);
   assert.ok(f.collector.canDeleteBroadcast('user123', '1001'));
   t.mock.timers.tick(10_000);
   await flush();
   assert.equal(calls, 3);
   chat.emit('event', event());
+  await flush();
   assert.equal(f.store.findBroadcast('1002').event_count, 2);
   chat.transition('closed');
   assert.equal(f.store.findBroadcast('1002').ended_at, null);
@@ -958,15 +1281,18 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   await flush();
   assert.equal(calls, 4);
   assert.equal(f.store.findBroadcast('1002').event_count, 3);
-  db.exec('PRAGMA query_only = ON');
+  db.exec(
+    "CREATE TRIGGER fail_insert BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+  );
   const previousCount = f.store.findBroadcast('1002').event_count;
   chat.emit('event', event());
+  await flush();
   assert.equal(f.collector.status(streamer).state, 'error');
   assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
   t.mock.timers.tick(20_000);
   await flush();
   assert.equal(calls, 4);
-  db.exec('PRAGMA query_only = OFF');
+  db.exec('DROP TRIGGER fail_insert');
   assert.equal(f.store.findBroadcast('1002').event_count, previousCount);
   f.collector.start(f.store.getStreamer('user123'));
   await flush();
@@ -1373,6 +1699,7 @@ test('room password changes and clearing preserve collection and apply on automa
     assert.equal(chat.disconnections, 0);
     assert.equal(chat.connections, 1);
     chat.emit('event', event());
+    await flush();
     assert.equal(f.store.findBroadcast('1001').event_count, count + 1);
     assert.equal(f.store.findBroadcast('1001').ended_at, null);
     chat.transition('closed');
@@ -1515,6 +1842,7 @@ test('account changes and clearing preserve collection and apply credentials on 
     );
     const count = f.store.findBroadcast('1001').event_count;
     chat.emit('event', event());
+    await flush();
     assert.equal(f.store.findBroadcast('1001').event_count, count + 1);
     chat.transition('closed');
     t.mock.timers.tick(10_000);
@@ -1796,7 +2124,10 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
   } finally {
     db.close();
   }
-  const reader = csvDownload(f.store, f.store.findBroadcast('1001'));
+  const reader = csvDownload(
+    f.store.databasePath('user123'),
+    f.store.findBroadcast('1001'),
+  );
   const chunks: Buffer[] = [];
   const iterator = reader[Symbol.asyncIterator]();
   const header = await iterator.next();
@@ -1818,7 +2149,10 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
   const before = readdirSync(tmpdir()).filter((name) =>
     name.startsWith('soop-chat-collector-'),
   );
-  const aborted = sqliteDownload(f.store, f.store.findBroadcast('1001'));
+  const aborted = sqliteDownload(
+    f.store.databasePath('user123'),
+    f.store.findBroadcast('1001'),
+  );
   const close = once(aborted, 'close');
   aborted.destroy();
   await close;
@@ -1829,7 +2163,10 @@ test('SQLite and CSV exports preserve the snapshot, DB column names, JSON and ra
     ),
     [],
   );
-  const cancelledCsv = csvDownload(f.store, f.store.findBroadcast('1001'));
+  const cancelledCsv = csvDownload(
+    f.store.databasePath('user123'),
+    f.store.findBroadcast('1001'),
+  );
   const csvClose = once(cancelledCsv, 'close');
   cancelledCsv.destroy();
   await csvClose;
@@ -1917,6 +2254,7 @@ test('long SELECT times out at 10 seconds while collection continues; cancellati
   await setTimeout(200);
   const previous = f.store.findBroadcast('1001').event_count;
   f.chats[0]?.emit('event', event());
+  await flush();
   assert.equal(f.store.findBroadcast('1001').event_count, previous + 1);
   assert.equal((await f.call('GET', '/api/broadcasts')).statusCode, 200);
   const response = await pending;

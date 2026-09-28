@@ -1,10 +1,21 @@
 import { fork } from 'node:child_process';
 
-import { ApiError } from './storage.ts';
+import { ApiError } from './types.ts';
 
 export function runQuery(
   path: string,
   sql: string,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>[]> {
+  return runDatabaseJob({ operation: 'query', path, sql }, signal);
+}
+
+export type DatabaseJob =
+  | { operation: 'query'; path: string; sql: string }
+  | { operation: 'delete'; path: string; broadcastNo: string };
+
+export function runDatabaseJob(
+  request: DatabaseJob,
   signal: AbortSignal,
 ): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
@@ -43,12 +54,17 @@ export function runQuery(
         worker.kill('SIGKILL');
       }
     };
-    const abort = () => finish(new ApiError(499, '조회가 취소되었습니다.'));
-    const timer = setTimeout(
-      () =>
-        finish(new ApiError(504, 'SELECT 실행 시간이 10초를 초과했습니다.')),
-      10_000,
-    );
+    const abort = () => finish(new ApiError(499, 'DB 작업이 취소되었습니다.'));
+    const timer =
+      request.operation === 'query'
+        ? setTimeout(
+            () =>
+              finish(
+                new ApiError(504, 'SELECT 실행 시간이 10초를 초과했습니다.'),
+              ),
+            10_000,
+          )
+        : undefined;
     signal.addEventListener('abort', abort, { once: true });
     worker.on(
       'message',
@@ -56,12 +72,13 @@ export function runQuery(
         ok: boolean;
         rows?: Record<string, unknown>[];
         message?: string;
+        statusCode?: number;
       }) => {
         finish(
           result.ok
             ? null
             : new ApiError(
-                400,
+                result.statusCode ?? 400,
                 result.message ?? 'SELECT 실행에 실패했습니다.',
               ),
           result.rows,
@@ -75,6 +92,6 @@ export function runQuery(
       if (!settled)
         finish(new ApiError(500, '조회 워커가 응답 없이 종료되었습니다.'));
     });
-    worker.send({ path, sql });
+    worker.send(request);
   });
 }

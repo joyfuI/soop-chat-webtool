@@ -1,27 +1,20 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 import cors from '@fastify/cors';
-import Fastify, { type FastifyError } from 'fastify';
+import Fastify, { type FastifyError, type FastifyReply } from 'fastify';
 import type { ChannelResolver } from 'soop-chat';
 
+import { AsyncStore } from './async-store.ts';
 import {
   type BroadcastLookup,
   type ChatFactory,
   Collector,
 } from './collector.ts';
-import { csvDownload, sqliteDownload } from './download.ts';
-import sqlitePlugin from './lib/fastifyNodeSqlite.ts';
+import { downloadBroadcast } from './download.ts';
 import { runQuery } from './query.ts';
-import {
-  ApiError,
-  DAY_MS,
-  initializeSettings,
-  MAX_RETENTION_DAYS,
-  Store,
-} from './storage.ts';
+import { ApiError, DAY_MS, MAX_RETENTION_DAYS } from './types.ts';
 
 type StreamerParams = { streamerId: string };
 type BroadcastParams = { broadcastNo: string };
@@ -86,34 +79,54 @@ export async function buildApp(options: {
         allowedHeaders: ['Authorization', 'Content-Type'],
       });
     }
-    await app.register(sqlitePlugin, {
-      path: join(options.dataDir, '_settings.db'),
-      wal: false,
-      setup: initializeSettings,
-    });
-    const store = new Store(app.sqlite.db, options.dataDir, options.secretKey);
+    const store = await AsyncStore.open(options.dataDir, options.secretKey);
+    app.addHook('onClose', async () => store.close());
     const collector = new Collector(
       store,
       options.createChat,
       options.resolveChannel,
       options.lookupBroadcast,
     );
+    await collector.reloadCredentials();
     const shutdown = new AbortController();
+    const jobs = new Set<Promise<unknown>>();
+    const requestJob = async <T>(
+      reply: FastifyReply,
+      execute: (signal: AbortSignal) => Promise<T>,
+    ) => {
+      const controller = new AbortController();
+      const cancel = () => {
+        if (!reply.raw.writableFinished) controller.abort();
+      };
+      reply.raw.once('close', cancel);
+      const job = execute(
+        AbortSignal.any([shutdown.signal, controller.signal]),
+      );
+      jobs.add(job);
+      try {
+        return await job;
+      } finally {
+        jobs.delete(job);
+        reply.raw.removeListener('close', cancel);
+      }
+    };
     let retentionTimer: ReturnType<typeof setTimeout> | undefined;
     let retentionRun: Promise<void> | undefined;
     const cleanExpiredBroadcasts = async () => {
       const now = Date.now();
-      for (const streamer of store.listStreamers()) {
+      for (const streamer of await store.listStreamers()) {
         if (shutdown.signal.aborted) return;
         if (streamer.retention_days === 0) continue;
         try {
-          const expired = store.listExpiredBroadcasts(
+          const expired = await store.listExpiredBroadcasts(
             streamer.streamer_id,
             now - streamer.retention_days * DAY_MS,
           );
           for (const broadcast of expired) {
             if (shutdown.signal.aborted) return;
-            if (!store.getStreamer(streamer.streamer_id, false).registered)
+            if (
+              !(await store.getStreamer(streamer.streamer_id, false)).registered
+            )
               break;
             if (
               !collector.canDeleteBroadcast(
@@ -122,7 +135,7 @@ export async function buildApp(options: {
               )
             )
               continue;
-            store.deleteBroadcast(broadcast);
+            await store.deleteBroadcast(broadcast, shutdown.signal);
             await setImmediate();
           }
         } catch {
@@ -178,11 +191,11 @@ export async function buildApp(options: {
       if (retentionTimer) clearTimeout(retentionTimer);
       await Promise.all([collector.shutdown(), retentionRun]);
       for (const stream of streams) stream.destroy();
+      await Promise.allSettled([...jobs]);
     });
-    app.addHook('onClose', async () => store.close());
 
     app.get('/api/streamers', async () =>
-      store.listStreamers().map((s) => collector.status(s)),
+      (await store.listStreamers()).map((s) => collector.status(s)),
     );
     app.post<{
       Body: {
@@ -211,7 +224,7 @@ export async function buildApp(options: {
           .code(201)
           .send(
             collector.status(
-              store.addStreamer(
+              await store.addStreamer(
                 request.body.streamerId,
                 request.body.roomPassword ?? null,
                 request.body.retentionDays,
@@ -239,17 +252,17 @@ export async function buildApp(options: {
         },
       },
       async (request) => {
-        const streamer = store.getStreamer(request.params.streamerId);
-        store.updateStreamer(streamer.streamer_id, request.body);
-        return collector.status(store.getStreamer(streamer.streamer_id));
+        const streamer = await store.getStreamer(request.params.streamerId);
+        await store.updateStreamer(streamer.streamer_id, request.body);
+        return collector.status(await store.getStreamer(streamer.streamer_id));
       },
     );
     app.delete<{ Params: StreamerParams }>(
       '/api/streamers/:streamerId',
       { schema: { params: streamerParams } },
       async (request, reply) => {
-        const streamer = store.getStreamer(request.params.streamerId);
-        store.removeStreamer(streamer.streamer_id);
+        const streamer = await store.getStreamer(request.params.streamerId);
+        await store.removeStreamer(streamer.streamer_id);
         await collector.stop(streamer.streamer_id);
         return reply.code(204).send();
       },
@@ -257,12 +270,13 @@ export async function buildApp(options: {
 
     for (const action of ['start', 'stop'] as const) {
       const change = async (id: string) => {
-        const streamer = store.getStreamer(id);
-        store.setEnabled(streamer.streamer_id, action === 'start');
-        if (action === 'start')
-          collector.start(store.getStreamer(streamer.streamer_id));
-        else await collector.stop(streamer.streamer_id);
-        return collector.status(store.getStreamer(streamer.streamer_id));
+        const streamer = await store.getStreamer(id);
+        await store.setEnabled(streamer.streamer_id, action === 'start');
+        if (action === 'start') {
+          const current = await store.getStreamer(streamer.streamer_id, false);
+          if (current.registered && current.enabled) collector.start(current);
+        } else await collector.stop(streamer.streamer_id);
+        return collector.status(await store.getStreamer(streamer.streamer_id));
       };
       app.post<{ Params: StreamerParams }>(
         `/api/collection/${action}/:streamerId`,
@@ -270,7 +284,9 @@ export async function buildApp(options: {
         async (request) => change(request.params.streamerId),
       );
       app.post(`/api/collection/${action}`, async () =>
-        Promise.all(store.listStreamers().map((s) => change(s.streamer_id))),
+        Promise.all(
+          (await store.listStreamers()).map((s) => change(s.streamer_id)),
+        ),
       );
     }
 
@@ -302,22 +318,20 @@ export async function buildApp(options: {
         },
       },
       async (request) => {
-        store.updateCredentials(
+        await store.updateCredentials(
           request.body.username?.trim() ?? null,
           request.body.password,
         );
-        collector.reloadCredentials();
+        await collector.reloadCredentials();
         return store.getSettings();
       },
     );
 
-    const broadcasts = (id?: string) =>
-      store
-        .listBroadcasts(id)
-        .map((b) => ({
-          ...b,
-          collecting: collector.isActive(b.streamer_id, b.broadcast_no),
-        }));
+    const broadcasts = async (id?: string) =>
+      (await store.listBroadcasts(id)).map((b) => ({
+        ...b,
+        collecting: collector.isActive(b.streamer_id, b.broadcast_no),
+      }));
     app.get('/api/broadcasts', async () => broadcasts());
     app.get<{ Params: StreamerParams }>(
       '/api/broadcasts/:streamerId',
@@ -328,7 +342,7 @@ export async function buildApp(options: {
       '/api/broadcasts/:broadcastNo',
       { schema: { params: broadcastParams } },
       async (request, reply) => {
-        const broadcast = store.findBroadcast(request.params.broadcastNo);
+        const broadcast = await store.findBroadcast(request.params.broadcastNo);
         if (
           !collector.canDeleteBroadcast(
             broadcast.streamer_id,
@@ -339,7 +353,9 @@ export async function buildApp(options: {
             409,
             '먼저 해당 스트리머의 수집을 중지해야 합니다.',
           );
-        store.deleteBroadcast(broadcast);
+        await requestJob(reply, (signal) =>
+          store.deleteBroadcast(broadcast, signal),
+        );
         return reply.code(204).send();
       },
     );
@@ -357,12 +373,16 @@ export async function buildApp(options: {
         },
       },
       async (request, reply) => {
-        const broadcast = store.findBroadcast(request.params.broadcastNo);
+        const broadcast = await store.findBroadcast(request.params.broadcastNo);
         const format = request.query.format;
-        const stream =
-          format === 'db'
-            ? sqliteDownload(store, broadcast)
-            : csvDownload(store, broadcast);
+        const path = await store.databasePath(broadcast.streamer_id);
+        const preparing = requestJob(reply, (signal) =>
+          downloadBroadcast(path, broadcast, format, signal),
+        );
+        const completion = preparing.then((download) => download.finished);
+        jobs.add(completion);
+        void completion.finally(() => jobs.delete(completion)).catch(() => {});
+        const { stream } = await preparing;
         streams.add(stream);
         stream.once('close', () => streams.delete(stream));
         return reply
@@ -393,26 +413,16 @@ export async function buildApp(options: {
         },
       },
       async (request, reply) => {
-        const controller = new AbortController();
-        const cancel = () => {
-          if (!reply.raw.writableFinished) controller.abort();
-        };
-        reply.raw.once('close', cancel);
-        try {
-          reply.header('Cache-Control', 'no-store');
-          return await runQuery(
-            store.databasePath(request.params.streamerId),
-            request.body.sql,
-            AbortSignal.any([shutdown.signal, controller.signal]),
-          );
-        } finally {
-          reply.raw.removeListener('close', cancel);
-        }
+        const path = await store.databasePath(request.params.streamerId);
+        reply.header('Cache-Control', 'no-store');
+        return requestJob(reply, (signal) =>
+          runQuery(path, request.body.sql, signal),
+        );
       },
     );
 
     app.addHook('onReady', async () => {
-      for (const streamer of store.listStreamers())
+      for (const streamer of await store.listStreamers())
         if (streamer.enabled) collector.start(streamer);
       startRetentionCleanup();
     });

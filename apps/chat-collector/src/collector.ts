@@ -11,7 +11,8 @@ import {
   SoopChatError,
 } from 'soop-chat';
 
-import type { Store, Streamer } from './storage.ts';
+import type { AsyncStore } from './async-store.ts';
+import type { StoredEvent, Streamer } from './types.ts';
 
 export type ChatFactory = (
   options: NodeSoopChatOptions,
@@ -59,10 +60,11 @@ type Runner = {
   timer: ReturnType<typeof setTimeout> | undefined;
   attempt: Promise<void> | undefined;
   unsubscribe: (() => void)[];
+  writes: Map<Promise<void>, string>;
 };
 
 export class Collector {
-  readonly store: Store;
+  readonly store: AsyncStore;
   readonly runners = new Map<string, Runner>();
   readonly createChat: ChatFactory;
   readonly resolverOverride: ChannelResolver | undefined;
@@ -71,10 +73,10 @@ export class Collector {
   private closing = false;
   private authentication: Promise<SoopAuthentication> | undefined;
   private authController = new AbortController();
-  private credentials: ReturnType<Store['getCredentials']>;
+  private credentials: Awaited<ReturnType<AsyncStore['getCredentials']>>;
 
   constructor(
-    store: Store,
+    store: AsyncStore,
     createChat: ChatFactory = (options) => new SoopChat(options),
     resolver?: ChannelResolver,
     broadcastLookup: BroadcastLookup = lookupBroadcast,
@@ -83,7 +85,6 @@ export class Collector {
     this.createChat = createChat;
     this.resolverOverride = resolver;
     this.lookupBroadcast = broadcastLookup;
-    this.credentials = store.getCredentials();
   }
 
   private resolve: ChannelResolver = async (id, context) => {
@@ -150,7 +151,12 @@ export class Collector {
     return (
       !this.restarting.has(id) &&
       !this.isActive(id, broadcastNo) &&
-      !(runner?.active && runner.state === 'connecting' && !runner.broadcastNo)
+      !(
+        runner?.active &&
+        runner.state === 'connecting' &&
+        !runner.broadcastNo
+      ) &&
+      !(runner?.active && [...runner.writes.values()].includes(broadcastNo))
     );
   }
 
@@ -161,7 +167,7 @@ export class Collector {
       return;
     if (previous) {
       lastBroadcastNo ??= previous.lastBroadcastNo;
-      this.dispose(previous);
+      void this.dispose(previous);
     }
     const runner: Runner = {
       streamer,
@@ -177,6 +183,7 @@ export class Collector {
       timer: undefined,
       attempt: undefined,
       unsubscribe: [],
+      writes: new Map(),
     };
     const current = () =>
       runner.active &&
@@ -198,12 +205,19 @@ export class Collector {
           runner.lastBroadcastNo !== channel.broadcastNo
         ) {
           try {
-            this.store.markEnded(id, runner.lastBroadcastNo);
+            await this.write(
+              runner,
+              runner.lastBroadcastNo,
+              this.store.markEnded(id, runner.lastBroadcastNo),
+            );
           } catch {
             this.failStorage(runner);
             throw new Error('방송 종료 저장에 실패했습니다.');
           }
         }
+        context.signal.throwIfAborted();
+        if (!current())
+          throw new DOMException('Connection cancelled', 'AbortError');
         runner.broadcastNo = channel.broadcastNo;
         runner.lastBroadcastNo = channel.broadcastNo;
         return channel;
@@ -213,28 +227,20 @@ export class Collector {
     runner.unsubscribe.push(
       runner.chat.on('event', (event) => {
         if (!current() || !runner.broadcastNo) return;
-        try {
-          this.store.saveEvent(streamer.streamer_id, runner.broadcastNo, event);
-        } catch {
-          this.failStorage(runner);
-        }
+        this.saveEvent(runner, event);
       }),
       runner.chat.on('protocolError', ({ error, raw }) => {
         if (!current() || !runner.broadcastNo || !raw) return;
-        try {
-          this.store.saveEvent(streamer.streamer_id, runner.broadcastNo, {
-            type: 'protocolError',
-            opcode: raw.opcode,
-            receivedAt: Date.now(),
-            raw,
-            data: {
-              code: error.code,
-              message: '프로토콜 이벤트를 해석할 수 없습니다.',
-            },
-          });
-        } catch {
-          this.failStorage(runner);
-        }
+        this.saveEvent(runner, {
+          type: 'protocolError',
+          opcode: raw.opcode,
+          receivedAt: Date.now(),
+          raw,
+          data: {
+            code: error.code,
+            message: '프로토콜 이벤트를 해석할 수 없습니다.',
+          },
+        });
       }),
       runner.chat.on('stateChange', ({ current: state }) => {
         if (!current()) return;
@@ -250,13 +256,12 @@ export class Collector {
       runner.chat.on('ended', ({ reason }) => {
         if (!current()) return;
         if (reason === 'offline' && runner.lastBroadcastNo) {
-          try {
-            this.store.markEnded(streamer.streamer_id, runner.lastBroadcastNo);
-            runner.lastBroadcastNo = null;
-          } catch {
-            this.failStorage(runner);
-            return;
-          }
+          this.write(
+            runner,
+            runner.lastBroadcastNo,
+            this.store.markEnded(streamer.streamer_id, runner.lastBroadcastNo),
+          );
+          runner.lastBroadcastNo = null;
         }
         runner.broadcastNo = null;
         this.schedule(runner);
@@ -278,6 +283,8 @@ export class Collector {
     if (!runner.blockedBroadcastNo) runner.state = 'connecting';
     let broadcastNo: string | null = null;
     runner.attempt = (async () => {
+      await this.store.waitForWrites(id);
+      if (!runner.active || runner.fatal) return;
       const signal = AbortSignal.any([
         runner.controller.signal,
         AbortSignal.timeout(10_000),
@@ -287,13 +294,18 @@ export class Collector {
       if (!runner.active || runner.fatal) return;
       if (runner.lastBroadcastNo && runner.lastBroadcastNo !== broadcastNo) {
         try {
-          this.store.markEnded(id, runner.lastBroadcastNo);
+          await this.write(
+            runner,
+            runner.lastBroadcastNo,
+            this.store.markEnded(id, runner.lastBroadcastNo),
+          );
           runner.lastBroadcastNo = null;
         } catch {
           this.failStorage(runner);
           return;
         }
       }
+      if (!runner.active || runner.fatal) return;
       if (runner.blockedBroadcastNo) {
         if (!broadcastNo || broadcastNo === runner.blockedBroadcastNo) return;
         runner.blockedBroadcastNo = null;
@@ -301,7 +313,8 @@ export class Collector {
       if (!broadcastNo) throw new BroadcastOfflineError(id);
       runner.state = 'connecting';
       try {
-        const streamer = this.store.getStreamer(id);
+        const streamer = await this.store.getStreamer(id);
+        if (!runner.active || runner.fatal) return;
         if (streamer.room_password !== runner.streamer.room_password) {
           void this.restart(id).catch(() => this.failStorage(runner));
           return;
@@ -312,7 +325,7 @@ export class Collector {
       }
       await runner.chat.connect();
     })()
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (!runner.active || runner.fatal) return;
         if (runner.blockedBroadcastNo) return;
         runner.broadcastNo = null;
@@ -321,9 +334,13 @@ export class Collector {
           runner.lastError = null;
           if (runner.lastBroadcastNo) {
             try {
-              this.store.markEnded(
-                runner.streamer.streamer_id,
+              await this.write(
+                runner,
                 runner.lastBroadcastNo,
+                this.store.markEnded(
+                  runner.streamer.streamer_id,
+                  runner.lastBroadcastNo,
+                ),
               );
               runner.lastBroadcastNo = null;
             } catch {
@@ -350,6 +367,29 @@ export class Collector {
       });
   }
 
+  private write(runner: Runner, broadcastNo: string, request: Promise<void>) {
+    runner.writes.set(request, broadcastNo);
+    void request
+      .catch(() => {
+        if (runner.active) this.failStorage(runner);
+      })
+      .finally(() => runner.writes.delete(request));
+    return request;
+  }
+
+  private saveEvent(runner: Runner, event: StoredEvent) {
+    if (!runner.broadcastNo) return;
+    this.write(
+      runner,
+      runner.broadcastNo,
+      this.store.saveEvent(
+        runner.streamer.streamer_id,
+        runner.broadcastNo,
+        event,
+      ),
+    );
+  }
+
   private schedule(runner: Runner) {
     if (!runner.active || runner.fatal || runner.timer || runner.attempt)
       return;
@@ -374,12 +414,13 @@ export class Collector {
     void runner.chat.disconnect().catch(() => {});
   }
 
-  private dispose(runner: Runner) {
+  private async dispose(runner: Runner) {
     runner.active = false;
     runner.controller.abort();
     if (runner.timer) clearTimeout(runner.timer);
     for (const off of runner.unsubscribe) off();
-    return runner.chat.disconnect().catch(() => {});
+    await runner.chat.disconnect().catch(() => {});
+    await Promise.allSettled([...runner.writes.keys()]);
   }
 
   async stop(id: string) {
@@ -390,14 +431,14 @@ export class Collector {
   }
 
   async restart(id: string) {
-    const canonical = this.store.getStreamer(id, false).streamer_id;
+    const canonical = (await this.store.getStreamer(id, false)).streamer_id;
     this.restarting.set(canonical, (this.restarting.get(canonical) ?? 0) + 1);
     try {
       const lastBroadcastNo =
         this.runners.get(canonical)?.lastBroadcastNo ?? null;
       await this.stop(canonical);
       if (this.closing) return;
-      const streamer = this.store.getStreamer(canonical, false);
+      const streamer = await this.store.getStreamer(canonical, false);
       if (streamer.registered && streamer.enabled)
         this.start(streamer, lastBroadcastNo);
     } finally {
@@ -407,8 +448,8 @@ export class Collector {
     }
   }
 
-  reloadCredentials() {
-    const credentials = this.store.getCredentials();
+  async reloadCredentials() {
+    const credentials = await this.store.getCredentials();
     this.authController.abort();
     this.authController = new AbortController();
     this.authentication = undefined;
