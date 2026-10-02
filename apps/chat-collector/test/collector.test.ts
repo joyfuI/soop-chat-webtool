@@ -1304,6 +1304,109 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   t.mock.timers.reset();
 });
 
+test('restricted authentication refreshes once and collects without a manual retry', async (t) => {
+  let broadcastNo = '1001';
+  let logins = 0;
+  let invalidCookie = 'AuthTicket=ticket-1';
+  let reason: 'adult' | 'subscriptionPlus' | 'loginRequired' = 'loginRequired';
+  const cookies: (string | null)[] = [];
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async (input: string, init: RequestInit) => {
+      if (input.startsWith('https://login.sooplive.com/')) {
+        const body = new URLSearchParams(String(init.body));
+        assert.equal(body.get('szUid'), 'test-account');
+        assert.equal(body.get('szPassword'), 'test-secret');
+        return Response.json(
+          { RESULT: 1 },
+          {
+            headers: { 'set-cookie': `AuthTicket=ticket-${++logins}; Path=/` },
+          },
+        );
+      }
+      assert.ok(input.startsWith('https://live.sooplive.com/'));
+      const cookie = new Headers(init.headers).get('cookie');
+      cookies.push(cookie);
+      if (cookie === invalidCookie)
+        return Response.json({
+          CHANNEL: {
+            RESULT:
+              reason === 'adult'
+                ? -6
+                : reason === 'subscriptionPlus'
+                  ? -14
+                  : -1,
+            REASON: reason === 'loginRequired' ? 'login required' : '',
+          },
+        });
+      return Response.json({
+        CHANNEL: {
+          RESULT: 1,
+          BNO: broadcastNo,
+          CHATNO: '1',
+          CHDOMAIN: 'localhost',
+          CHPT: 8000,
+          TK: 'chat-ticket',
+          FTK: 'fan-ticket',
+        },
+      });
+    },
+  );
+  const f = await fixture(t, null, [], async () => broadcastNo);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('PATCH', '/api/settings', {
+    username: 'test-account',
+    password: 'test-secret',
+  });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'collecting',
+  );
+  assert.equal(logins, 2);
+  assert.deepEqual(cookies, ['AuthTicket=ticket-1', 'AuthTicket=ticket-2']);
+  for (const restriction of [
+    'adult',
+    'subscriptionPlus',
+    'loginRequired',
+  ] as const) {
+    reason = restriction;
+    invalidCookie = `AuthTicket=ticket-${logins}`;
+    const previousLogins = logins;
+    broadcastNo = String(Number(broadcastNo) + 1);
+    chat.transition('closed');
+    t.mock.timers.tick(10_000);
+    await flush();
+    assert.equal(logins, previousLogins + 1);
+    assert.deepEqual(cookies.slice(-2), [
+      invalidCookie,
+      `AuthTicket=ticket-${logins}`,
+    ]);
+    assert.equal(
+      f.collector.status(f.store.getStreamer('user123')).state,
+      'collecting',
+    );
+    assert.equal(
+      f.collector.status(f.store.getStreamer('user123')).lastError,
+      null,
+    );
+    assert.equal(
+      f.collector.status(f.store.getStreamer('user123')).broadcastNo,
+      broadcastNo,
+    );
+    assert.equal(f.store.findBroadcast(broadcastNo).event_count, 1);
+  }
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(cookies.length, 8);
+  assert.equal(f.chats.length, 1);
+});
+
 test('restricted broadcasts wait for a new number; settings preserve the block and start retries the same broadcast', async (t) => {
   for (const reason of [
     'password',
@@ -1312,6 +1415,10 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
     'loginRequired',
   ] as const) {
     await t.test(reason, async (t) => {
+      const requestsPerConnection = reason === 'password' ? 1 : 2;
+      const expectedLogins = Array<string>(requestsPerConnection).fill(
+        'first-account',
+      );
       let broadcastNo: string | null = '1001';
       let denied = true;
       let metadataFailure: 'http' | 'json' | 'number' | null = null;
@@ -1390,7 +1497,7 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
       });
       await f.call('POST', '/api/collection/start/user123');
       await flush();
-      assert.equal(liveRequests, 1);
+      assert.equal(liveRequests, requestsPerConnection);
       assert.equal(polls, 1);
       assert.equal(passwordChecks, reason === 'password' ? 1 : 0);
       assert.equal(
@@ -1427,9 +1534,9 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
         await flush();
       }
       metadataFailure = null;
-      assert.equal(liveRequests, 1);
+      assert.equal(liveRequests, requestsPerConnection);
       assert.equal(passwordChecks, reason === 'password' ? 1 : 0);
-      assert.deepEqual(logins, ['first-account']);
+      assert.deepEqual(logins, expectedLogins);
       assert.equal(
         f.chats.reduce((n, chat) => n + chat.connections, 0),
         1,
@@ -1440,9 +1547,12 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
       );
       await f.call('POST', '/api/collection/start/user123');
       await flush();
-      assert.equal(liveRequests, 2);
+      assert.equal(liveRequests, requestsPerConnection * 2);
       assert.equal(passwordChecks, reason === 'password' ? 2 : 0);
-      assert.deepEqual(logins, ['first-account', 'second-account']);
+      expectedLogins.push(
+        ...Array<string>(requestsPerConnection).fill('second-account'),
+      );
+      assert.deepEqual(logins, expectedLogins);
       assert.equal(passwords.at(-1), 'updated');
       assert.equal(
         f.chats.reduce((n, chat) => n + chat.connections, 0),
@@ -1454,18 +1564,14 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
       );
       t.mock.timers.tick(10_000);
       await flush();
-      assert.equal(liveRequests, 2);
+      assert.equal(liveRequests, requestsPerConnection * 2);
       broadcastNo = '1002';
       denied = false;
       t.mock.timers.tick(10_000);
       await flush();
-      assert.equal(liveRequests, 3);
-      assert.deepEqual(
-        logins,
-        reason === 'password'
-          ? ['first-account', 'second-account']
-          : ['first-account', 'second-account', 'second-account'],
-      );
+      assert.equal(liveRequests, requestsPerConnection * 2 + 1);
+      if (reason !== 'password') expectedLogins.push('second-account');
+      assert.deepEqual(logins, expectedLogins);
       assert.equal(passwords.at(-1), 'updated');
       assert.equal(
         f.collector.status(f.store.getStreamer('user123')).state,
@@ -1486,11 +1592,11 @@ test('restricted broadcasts wait for a new number; settings preserve the block a
       f.chats.at(-1)?.transition('closed');
       t.mock.timers.tick(10_000);
       await flush();
-      assert.equal(liveRequests, 4);
+      assert.equal(liveRequests, requestsPerConnection * 3 + 1);
       assert.ok(f.store.findBroadcast('1002').ended_at);
       t.mock.timers.tick(10_000);
       await flush();
-      assert.equal(liveRequests, 4);
+      assert.equal(liveRequests, requestsPerConnection * 3 + 1);
     });
   }
 });

@@ -94,32 +94,37 @@ export class Collector {
     ]);
     const request = { ...context, signal };
     if (this.resolverOverride) return this.resolverOverride(id, request);
-    if (!this.credentials) return resolveNodeChannel(id, request);
-    if (!this.authentication) {
-      const pending = authenticateNode(this.credentials, {
-        signal: AbortSignal.any([
-          this.authController.signal,
-          AbortSignal.timeout(10_000),
-        ]),
-      });
-      this.authentication = pending;
-      void pending.catch(() => {
-        if (this.authentication === pending) this.authentication = undefined;
-      });
-    }
-    const pending = this.authentication;
-    try {
-      const authentication = await pending;
+    for (let attempt = 0; ; attempt++) {
       signal.throwIfAborted();
-      return await resolveNodeChannel(id, { ...request, authentication });
-    } catch (error) {
-      if (
-        this.authentication === pending &&
-        (error instanceof AuthenticationError ||
-          (error instanceof RestrictedRoomError && error.reason !== 'password'))
-      )
-        this.authentication = undefined;
-      throw error;
+      if (!this.credentials) return resolveNodeChannel(id, request);
+      if (!this.authentication) {
+        const pending = authenticateNode(this.credentials, {
+          signal: AbortSignal.any([
+            this.authController.signal,
+            AbortSignal.timeout(10_000),
+          ]),
+        });
+        this.authentication = pending;
+        void pending.catch(() => {
+          if (this.authentication === pending) this.authentication = undefined;
+        });
+      }
+      const pending = this.authentication;
+      try {
+        const authentication = await pending;
+        signal.throwIfAborted();
+        return await resolveNodeChannel(id, { ...request, authentication });
+      } catch (error) {
+        const restricted =
+          error instanceof RestrictedRoomError && error.reason !== 'password';
+        if (
+          this.authentication === pending &&
+          (error instanceof AuthenticationError || restricted)
+        )
+          this.authentication = undefined;
+        if (attempt === 0 && restricted) continue;
+        throw error;
+      }
     }
   };
 
