@@ -33,7 +33,11 @@ app.use(
     origin:
       process.env.NODE_ENV === 'development'
         ? '*'
-        : ['https://soop-gamepinball-helper.netlify.app'],
+        : [
+            'https://soop-gamepinball-helper.netlify.app',
+            'https://bluejump-fan.vercel.app',
+            'http://localhost:3000',
+          ],
     allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     credentials: true,
   }),

@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@joyfui/typescript-config": "workspace:*",
-    "@types/node": "^26.6.2",
-    "wrangler": "^4.140.0"
+    "@types/node": "^26.6.4",
+    "wrangler": "^4.147.0"
   }
 }
