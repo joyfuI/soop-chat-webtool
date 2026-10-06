@@ -1,7 +1,14 @@
 import type { PropsWithChildren } from 'react';
-import { createContext, useCallback, useContext, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useRef,
+  useState,
+} from 'react';
 import { deserializeChannelResolutionError, SoopChat } from 'soop-chat/browser';
 
+import useComponentWillUnmount from './hooks/useComponentWillUnmount';
 import api from './lib/api';
 
 type SoopChatContextValue = {
@@ -13,9 +20,10 @@ const SoopChatContext = createContext<SoopChatContextValue | null>(null);
 
 export const SoopChatProvider = ({ children }: PropsWithChildren) => {
   const [chat, setChat] = useState<SoopChatContextValue['chat']>(null);
+  const chatRef = useRef<SoopChatContextValue['chat']>(null);
 
   const connectChat = useCallback(async (streamerId: string) => {
-    const chat = new SoopChat({
+    const soopChat = new SoopChat({
       streamerId,
       resolveChannel: async (streamerId, { signal }) => {
         const response = await api.channel.$get(
@@ -29,9 +37,16 @@ export const SoopChatProvider = ({ children }: PropsWithChildren) => {
         return response.json();
       },
     });
-    setChat(chat);
-    await chat.connect();
+    // 기존 연결 끊고 연결
+    chatRef.current?.disconnect().catch(console.error);
+    chatRef.current = soopChat;
+    setChat(soopChat);
+    await soopChat.connect();
   }, []);
+
+  useComponentWillUnmount(() => {
+    chatRef.current?.disconnect().catch(console.error);
+  });
 
   return (
     <SoopChatContext.Provider value={{ chat, connectChat }}>

@@ -298,6 +298,9 @@ importers:
 
   apps/gamepinball-helper:
     dependencies:
+      '@emotion/cache':
+        specifier: ^11.14.0
+        version: 11.14.0
       '@emotion/react':
         specifier: 'catalog:'
         version: 11.14.0(@types/react@19.3.0)(react@19.3.0)(supports-color@10.2.2)
@@ -322,6 +325,9 @@ importers:
       react:
         specifier: 'catalog:'
         version: 19.3.0
+      react-document-pip:
+        specifier: ^1.3.0
+        version: 1.3.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       react-dom:
         specifier: 'catalog:'
         version: 19.3.0(react@19.3.0)
@@ -1956,6 +1962,12 @@ packages:
   quick-format-unescaped@4.0.4:
     resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
 
+  react-document-pip@1.3.0:
+    resolution: {integrity: sha512-mPYeZhabwwIAEx1zCvORMLU2sscJR7NQbnGdC2wBH1Cm0KCSYvuUIuDL+HvX+BWVuWR2IOWNSfvDhcj0V4+fkA==}
+    peerDependencies:
+      react: '>=18.2.0'
+      react-dom: '>=18.2.0'
+
   react-dom@19.3.0:
     resolution: {integrity: sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==}
     peerDependencies:
@@ -3434,6 +3446,11 @@ snapshots:
       react-is: 16.13.1
 
   quick-format-unescaped@4.0.4: {}
+
+  react-document-pip@1.3.0(react-dom@19.3.0(react@19.3.0))(react@19.3.0):
+    dependencies:
+      react: 19.3.0
+      react-dom: 19.3.0(react@19.3.0)
 
   react-dom@19.3.0(react@19.3.0):
     dependencies:

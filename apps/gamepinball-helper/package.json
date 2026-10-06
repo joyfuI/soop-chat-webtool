@@ -13,6 +13,7 @@
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
+    "@emotion/cache": "^11.14.0",
     "@emotion/react": "catalog:",
     "@emotion/styled": "catalog:",
     "@joyfui/api-client": "workspace:*",
@@ -21,6 +22,7 @@
     "@mui/material": "catalog:",
     "notistack": "^3.0.2",
     "react": "catalog:",
+    "react-document-pip": "^1.3.0",
     "react-dom": "catalog:",
     "soop-chat": "catalog:",
     "zod": "^4.5.4"

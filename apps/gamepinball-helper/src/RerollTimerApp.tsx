@@ -7,6 +7,7 @@ import Typography from '@mui/material/Typography';
 import type { ChangeEvent } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import useComponentWillUnmount from './hooks/useComponentWillUnmount';
 import useStore from './hooks/useStore';
 import { useSoopChat } from './SoopChatContext';
 import type { DonationEvent } from './types';
@@ -60,6 +61,12 @@ const RerollTimerApp = () => {
         break;
     }
   }, [step, streamerId, minute, second, chat, connectChat, interval]);
+
+  useComponentWillUnmount(() => {
+    if (timer.current) {
+      clearInterval(timer.current);
+    }
+  });
 
   useEffect(() => {
     if (step === 1 && mm === 0 && ss === 0) {
