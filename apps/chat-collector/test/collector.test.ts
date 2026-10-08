@@ -2346,8 +2346,8 @@ test('SELECT API supports CTE/JOIN/aggregates and rejects mutations, multiple st
   );
 });
 
-test('long SELECT times out at 10 seconds while collection continues; cancellation and shutdown release processes', {
-  timeout: 20_000,
+test('long SELECT times out at 30 seconds while collection continues; cancellation and shutdown release processes', {
+  timeout: 40_000,
 }, async (t) => {
   const f = await fixture(t);
   await f.call('POST', '/api/streamers', { streamerId: 'user123' });
@@ -2365,7 +2365,11 @@ test('long SELECT times out at 10 seconds while collection continues; cancellati
   assert.equal((await f.call('GET', '/api/broadcasts')).statusCode, 200);
   const response = await pending;
   assert.equal(response.statusCode, 504);
-  assert.ok(Date.now() - started >= 9900 && Date.now() - started < 13_000);
+  assert.equal(
+    response.json().message,
+    'SELECT 실행 시간이 30초를 초과했습니다.',
+  );
+  assert.ok(Date.now() - started >= 29_900 && Date.now() - started < 33_000);
   const controller = new AbortController();
   const cancelled = runQuery(
     f.store.databasePath('user123'),

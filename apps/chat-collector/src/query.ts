@@ -60,9 +60,9 @@ export function runDatabaseJob(
         ? setTimeout(
             () =>
               finish(
-                new ApiError(504, 'SELECT 실행 시간이 10초를 초과했습니다.'),
+                new ApiError(504, 'SELECT 실행 시간이 30초를 초과했습니다.'),
               ),
-            10_000,
+            30_000,
           )
         : undefined;
     signal.addEventListener('abort', abort, { once: true });
