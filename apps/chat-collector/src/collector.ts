@@ -2,6 +2,7 @@ import {
   AuthenticationError,
   authenticateNode,
   BroadcastOfflineError,
+  ChannelResolutionError,
   type ChannelResolver,
   type NodeSoopChatOptions,
   RestrictedRoomError,
@@ -115,14 +116,19 @@ export class Collector {
         signal.throwIfAborted();
         return await resolveNodeChannel(id, { ...request, authentication });
       } catch (error) {
-        const restricted =
-          error instanceof RestrictedRoomError && error.reason !== 'password';
+        // ponytail: soop-chat이 인증 필드 누락 코드를 제공하면 메시지 비교를 대체한다.
+        const refreshAuthentication =
+          (error instanceof RestrictedRoomError &&
+            error.reason !== 'password') ||
+          (error instanceof ChannelResolutionError &&
+            error.message ===
+              'SOOP live-info API omitted authenticated chat fields.');
         if (
           this.authentication === pending &&
-          (error instanceof AuthenticationError || restricted)
+          (error instanceof AuthenticationError || refreshAuthentication)
         )
           this.authentication = undefined;
-        if (attempt === 0 && restricted) continue;
+        if (attempt === 0 && refreshAuthentication) continue;
         throw error;
       }
     }

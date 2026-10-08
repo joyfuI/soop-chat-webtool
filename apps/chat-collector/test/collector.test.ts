@@ -1407,6 +1407,103 @@ test('restricted authentication refreshes once and collects without a manual ret
   assert.equal(f.chats.length, 1);
 });
 
+test('missing authenticated chat fields refresh once; unrelated channel errors keep authentication', async (t) => {
+  for (const failure of ['TK', 'FTK', 'persistent', 'http'] as const) {
+    await t.test(failure, async (t) => {
+      let logins = 0;
+      let liveRequests = 0;
+      const cookies: (string | null)[] = [];
+      t.mock.method(
+        globalThis,
+        'fetch',
+        async (input: string, init: RequestInit) => {
+          if (input.startsWith('https://login.sooplive.com/')) {
+            const body = new URLSearchParams(String(init.body));
+            assert.equal(body.get('szUid'), 'test-account');
+            assert.equal(body.get('szPassword'), 'test-secret');
+            return Response.json(
+              { RESULT: 1 },
+              {
+                headers: {
+                  'set-cookie': `AuthTicket=ticket-${++logins}; Path=/`,
+                },
+              },
+            );
+          }
+          assert.ok(input.startsWith('https://live.sooplive.com/'));
+          const cookie = new Headers(init.headers).get('cookie');
+          cookies.push(cookie);
+          liveRequests++;
+          if (liveRequests > 1 && failure === 'http')
+            return Response.json({}, { status: 503 });
+          const response: Record<string, string | number> = {
+            RESULT: 1,
+            BNO: '1001',
+            CHATNO: '1',
+            CHDOMAIN: 'localhost',
+            CHPT: 8000,
+            TK: 'chat-ticket',
+            FTK: 'fan-ticket',
+          };
+          if (
+            liveRequests > 1 &&
+            (cookie === 'AuthTicket=ticket-1' || failure === 'persistent')
+          )
+            delete response[failure === 'FTK' ? 'FTK' : 'TK'];
+          return Response.json({ CHANNEL: response });
+        },
+      );
+      const f = await fixture(t, null);
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      await f.call('PATCH', '/api/settings', {
+        username: 'test-account',
+        password: 'test-secret',
+      });
+      await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+      await f.call('POST', '/api/collection/start/user123');
+      await flush();
+      const chat = f.chats[0];
+      assert.ok(chat);
+      const streamer = f.store.getStreamer('user123');
+      assert.equal(f.collector.status(streamer).state, 'collecting');
+      assert.equal(logins, 1);
+      assert.equal(liveRequests, 1);
+
+      chat.transition('closed');
+      t.mock.timers.tick(10_000);
+      await flush();
+      const failed = failure === 'persistent' || failure === 'http';
+      assert.equal(
+        f.collector.status(streamer).state,
+        failed ? 'error' : 'collecting',
+      );
+      assert.equal(
+        f.collector.status(streamer).lastError?.code ?? null,
+        failed ? 'CHANNEL_RESOLUTION_FAILED' : null,
+      );
+      assert.equal(logins, failure === 'http' ? 1 : 2);
+      assert.deepEqual(
+        cookies,
+        failure === 'http'
+          ? ['AuthTicket=ticket-1', 'AuthTicket=ticket-1']
+          : [
+              'AuthTicket=ticket-1',
+              'AuthTicket=ticket-1',
+              'AuthTicket=ticket-2',
+            ],
+      );
+
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(
+        logins,
+        failure === 'persistent' ? 4 : failure === 'http' ? 1 : 2,
+      );
+      assert.equal(liveRequests, failure === 'persistent' ? 5 : 3);
+    });
+  }
+});
+
 test('restricted broadcasts wait for a new number; settings preserve the block and start retries the same broadcast', async (t) => {
   for (const reason of [
     'password',
