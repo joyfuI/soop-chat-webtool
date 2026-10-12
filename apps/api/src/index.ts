@@ -67,6 +67,7 @@ const route = app
         const channel = await resolveNodeChannel(streamerId, {
           signal: c.req.raw.signal,
         });
+        console.info({ event: 'channel_lookup_success', streamerId });
         return c.json(channel, 200);
       } catch (e) {
         return handleError(e, c);
@@ -101,6 +102,7 @@ const route = app
             ? {}
             : { authentication: { authTicket } }),
         });
+        console.info({ event: 'channel_lookup_success', streamerId });
         return c.json(channel, 200);
       } catch (e) {
         return handleError(e, c);
@@ -129,6 +131,10 @@ const route = app
           await encryptAuthTicket(authTicket, c.env.AUTH_COOKIE_KEY),
           AUTH_COOKIE_OPTIONS,
         );
+        console.info({
+          event: 'login_success',
+          username: credentials.username,
+        });
         return c.body(null, 200);
       } catch (e) {
         return handleError(e, c);
