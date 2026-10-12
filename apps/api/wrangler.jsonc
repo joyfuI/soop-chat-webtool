@@ -4,7 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-21",
   "preview_urls": false,
-  "secrets": { "required": ["AUTH_COOKIE_KEY"] },
+  "secrets": {
+    "required": ["AUTH_COOKIE_KEY", "TURN_KEY_ID", "TURN_KEY_API_TOKEN"]
+  },
   "observability": { "enabled": true }
   // "compatibility_flags": [
   //   "nodejs_compat"

@@ -13,8 +13,8 @@ import {
 } from 'soop-chat';
 import * as z from 'zod';
 
-import { decryptAuthTicket, encryptAuthTicket } from './auth-cookie';
-import { zValidator } from './validator-wrapper';
+import { decryptAuthTicket, encryptAuthTicket } from './auth-cookie.ts';
+import { zValidator } from './validator-wrapper.ts';
 
 const AUTH_COOKIE_NAME = '__Host-soop-auth';
 const AUTH_COOKIE_OPTIONS = {
@@ -145,6 +145,61 @@ const route = app
     c.header('Cache-Control', 'no-store');
     deleteCookie(c, AUTH_COOKIE_NAME, AUTH_COOKIE_OPTIONS);
     return c.body(null, 204);
+  })
+  .get('/turn', async (c) => {
+    c.header('Cache-Control', 'no-store');
+    const { TURN_KEY_ID, TURN_KEY_API_TOKEN } = c.env;
+    if (!TURN_KEY_ID || !TURN_KEY_API_TOKEN) {
+      return c.json(
+        {
+          code: 'TURN_NOT_CONFIGURED',
+          message: 'TURN credentials are not configured.',
+        },
+        503,
+      );
+    }
+
+    try {
+      const response = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(TURN_KEY_ID)}/credentials/generate-ice-servers`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${TURN_KEY_API_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ttl: 86400 }),
+          signal: c.req.raw.signal,
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`Cloudflare TURN returned HTTP ${response.status}.`);
+      }
+
+      const credentials = z
+        .object({
+          iceServers: z
+            .array(
+              z.object({
+                urls: z.array(z.string().min(1)).min(1),
+                username: z.string().min(1).optional(),
+                credential: z.string().min(1).optional(),
+              }),
+            )
+            .min(1),
+        })
+        .parse(await response.json());
+      return c.json(credentials, 200);
+    } catch (e) {
+      console.error({ event: 'turn_credentials_error', error: e });
+      return c.json(
+        {
+          code: 'TURN_UNAVAILABLE',
+          message: 'Failed to issue TURN credentials.',
+        },
+        503,
+      );
+    }
   });
 
 export type AppType = typeof route;
