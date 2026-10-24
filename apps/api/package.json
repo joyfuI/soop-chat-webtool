@@ -18,11 +18,11 @@
     "@hono/zod-validator": "^0.9.1",
     "hono": "catalog:",
     "soop-chat": "catalog:",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@joyfui/typescript-config": "workspace:*",
     "@types/node": "^26.6.5",
-    "wrangler": "^4.149.0"
+    "wrangler": "^4.152.0"
   }
 }

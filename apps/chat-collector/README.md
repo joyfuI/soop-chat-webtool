@@ -15,13 +15,13 @@ node --input-type=module -e "import { randomBytes } from 'node:crypto'; console.
 
 첫 번째 결과를 `COLLECTOR_API_KEY`, 두 번째 결과를 `COLLECTOR_SECRET_KEY`에 넣습니다.
 
-| 환경 변수 | 설명 |
-| --- | --- |
-| `COLLECTOR_API_KEY` | 모든 API의 Bearer 인증 키, 필수 |
-| `COLLECTOR_SECRET_KEY` | SOOP 계정 비밀번호 암호화용 Base64 32바이트 키, 필수 |
+| 환경 변수                | 설명                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `COLLECTOR_API_KEY`      | 모든 API의 Bearer 인증 키, 필수                                                |
+| `COLLECTOR_SECRET_KEY`   | SOOP 계정 비밀번호 암호화용 Base64 32바이트 키, 필수                           |
 | `COLLECTOR_CORS_ORIGINS` | 브라우저 직접 호출을 허용할 출처 목록. 쉼표로 구분하며 미설정 시 CORS 비활성화 |
-| `HOST` | 기본 `0.0.0.0` |
-| `PORT` | 기본 `3000` |
+| `HOST`                   | 기본 `0.0.0.0`                                                                 |
+| `PORT`                   | 기본 `3000`                                                                    |
 
 저장된 계정을 복호화하려면 재시작할 때도 같은 암호화 키를 사용해야 합니다. 키는 DB와 별도로 보관합니다.
 
@@ -109,24 +109,24 @@ Node의 내장 TypeScript 실행은 타입을 제거하고 실행하며 타입 �
 
 어드민 웹페이지에서 직접 연결하려면 `COLLECTOR_CORS_ORIGINS=http://localhost:5173,http://localhost:4173`처럼 정확한 출처를 지정하고 서버를 재시작합니다. 출처에는 경로나 마지막 `/`를 넣지 않습니다. 와일드카드는 허용하지 않습니다. CORS OPTIONS 사전 요청은 인증 없이 처리하지만 실제 API 요청에는 Bearer 인증이 필요합니다. 허용한 출처에서 오류 응답도 읽을 수 있습니다. 출처 허용은 인증을 대체하지 않습니다.
 
-| 메서드 | 경로 | 요청·동작 |
-| --- | --- | --- |
-| POST | `/api/streamers` | `{ "streamerId": "streamer123", "roomPassword": "optional", "retentionDays": 30 }`, 비밀번호·보존 일수는 선택, 등록 후 201 |
-| GET | `/api/streamers` | 등록된 전체 대상과 상태 |
-| PATCH | `/api/streamers/:streamerId` | `roomPassword`, `retentionDays` 중 하나 이상 수정, 생략한 값은 유지, 방 비밀번호는 `null`이면 해제 |
-| DELETE | `/api/streamers/:streamerId` | 중지·등록 해제, 기록 보존, 204 |
-| POST | `/api/collection/start/:streamerId` | 개별 시작 |
-| POST | `/api/collection/stop/:streamerId` | 개별 중지 |
-| POST | `/api/collection/start` | 현재 등록된 전체 대상 시작 |
-| POST | `/api/collection/stop` | 전체 중지 |
-| GET | `/api/settings` | `username`, `passwordConfigured` |
-| PATCH | `/api/settings` | `{ "username": "account", "password": "secret" }`, 둘 다 `null`이면 해제 |
-| GET | `/api/broadcasts` | 등록 해제된 대상까지 포함한 전체 방송 |
-| GET | `/api/broadcasts/:streamerId` | 해당 스트리머의 전체 방송 |
-| DELETE | `/api/broadcasts/:broadcastNo` | 방송·관련 이벤트 삭제, 204 |
-| GET | `/api/broadcasts/:broadcastNo/download?format=db` | 특정 방송의 독립 SQLite 파일 (`.db`) |
-| GET | `/api/broadcasts/:broadcastNo/download?format=csv` | 특정 방송의 CSV |
-| POST | `/api/query/:streamerId` | `{ "sql": "SELECT ..." }` |
+| 메서드 | 경로                                               | 요청·동작                                                                                                                  |
+| ------ | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/api/streamers`                                   | `{ "streamerId": "streamer123", "roomPassword": "optional", "retentionDays": 30 }`, 비밀번호·보존 일수는 선택, 등록 후 201 |
+| GET    | `/api/streamers`                                   | 등록된 전체 대상과 상태                                                                                                    |
+| PATCH  | `/api/streamers/:streamerId`                       | `roomPassword`, `retentionDays` 중 하나 이상 수정, 생략한 값은 유지, 방 비밀번호는 `null`이면 해제                         |
+| DELETE | `/api/streamers/:streamerId`                       | 중지·등록 해제, 기록 보존, 204                                                                                             |
+| POST   | `/api/collection/start/:streamerId`                | 개별 시작                                                                                                                  |
+| POST   | `/api/collection/stop/:streamerId`                 | 개별 중지                                                                                                                  |
+| POST   | `/api/collection/start`                            | 현재 등록된 전체 대상 시작                                                                                                 |
+| POST   | `/api/collection/stop`                             | 전체 중지                                                                                                                  |
+| GET    | `/api/settings`                                    | `username`, `passwordConfigured`                                                                                           |
+| PATCH  | `/api/settings`                                    | `{ "username": "account", "password": "secret" }`, 둘 다 `null`이면 해제                                                   |
+| GET    | `/api/broadcasts`                                  | 등록 해제된 대상까지 포함한 전체 방송                                                                                      |
+| GET    | `/api/broadcasts/:streamerId`                      | 해당 스트리머의 전체 방송                                                                                                  |
+| DELETE | `/api/broadcasts/:broadcastNo`                     | 방송·관련 이벤트 삭제, 204                                                                                                 |
+| GET    | `/api/broadcasts/:broadcastNo/download?format=db`  | 특정 방송의 독립 SQLite 파일 (`.db`)                                                                                       |
+| GET    | `/api/broadcasts/:broadcastNo/download?format=csv` | 특정 방송의 CSV                                                                                                            |
+| POST   | `/api/query/:streamerId`                           | `{ "sql": "SELECT ..." }`                                                                                                  |
 
 시작·중지는 반복 호출해도 안전합니다. 대상 목록의 `state`는 `stopped`, `waiting`, `connecting`, `collecting`, `error`이며, `enabled`는 저장된 시작 여부입니다. 목록·등록·수정·수집 제어 응답에 `retentionDays`와 평문 방 비밀번호 `roomPassword`를 포함합니다. 방 비밀번호가 없으면 `null`입니다. SOOP 계정 비밀번호는 반환하지 않습니다.
 
@@ -172,12 +172,10 @@ SQLite 파일 생성과 CSV 읽기는 별도 프로세스에서 수행합니다.
 ## 데이터 스키마
 
 `data/_settings.db`:
-
 - `settings`: 단일 `id=1`, `soop_username`, `soop_password_ciphertext`, `soop_password_iv`, `soop_password_tag`, `updated_at`.
 - `streamers`: `streamer_id`(대소문자 무시 PK), `room_password`, `retention_days`(INTEGER, NOT NULL, 기본값 0, 0 이상), `registered`, `enabled`, `created_at`, `updated_at`.
 
 `data/<streamerId>.db`:
-
 - `broadcasts`: `broadcast_no`(PK), `streamer_id`, `first_collected_at`, `last_collected_at`, `ended_at`, `event_count`.
 - `events`: `id`(PK), `broadcast_no`(외래 키·연관 삭제), `type`, `opcode`, `received_at`, `data`(유효 JSON), `raw_flags`, `raw_payload`(BLOB).
 - 인덱스: 방송 수집 시각과 방송별 이벤트 ID. 모든 테이블은 `STRICT`입니다.
