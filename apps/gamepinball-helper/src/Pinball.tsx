@@ -47,30 +47,30 @@ const Pinball = () => {
   };
 
   const handleOpenClick = () => {
-    if ('documentPictureInPicture' in window) {
-      setOpen(true);
-    } else {
-      const left = Math.round(
-        window.screenX + (window.outerWidth - POPUP_WIDTH) / 2,
-      );
-      const top = Math.round(
-        window.screenY + (window.outerHeight - POPUP_HEIGHT) / 2,
-      );
+    setOpen(true);
+  };
 
-      const popup = window.open(
-        '?window=reroll-timer',
-        'reroll-timer',
-        objectToFeatures({
-          popup: true,
-          width: POPUP_WIDTH,
-          height: POPUP_HEIGHT,
-          left,
-          top,
-        }),
-      );
-      if (!popup) {
-        alert('팝업을 허용해주세요.');
-      }
+  const handleOpen2Click = () => {
+    const left = Math.round(
+      window.screenX + (window.outerWidth - POPUP_WIDTH) / 2,
+    );
+    const top = Math.round(
+      window.screenY + (window.outerHeight - POPUP_HEIGHT) / 2,
+    );
+
+    const popup = window.open(
+      '?window=reroll-timer',
+      'reroll-timer',
+      objectToFeatures({
+        popup: true,
+        width: POPUP_WIDTH,
+        height: POPUP_HEIGHT,
+        left,
+        top,
+      }),
+    );
+    if (!popup) {
+      alert('팝업을 허용해주세요.');
     }
   };
 
@@ -152,6 +152,13 @@ const Pinball = () => {
               variant="outlined"
             >
               리롤 타이머 열기
+            </Button>
+            <Button
+              endIcon={<OpenInNewIcon />}
+              onClick={handleOpen2Click}
+              variant="outlined"
+            >
+              리롤 타이머(레거시) 열기
             </Button>
           </Stack>
         </FormLabel>
