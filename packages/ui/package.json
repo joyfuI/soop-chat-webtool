@@ -1,7 +1,7 @@
 {
   "name": "@joyfui/ui",
   "private": true,
-  "exports": { "./*": "./src/*.tsx" },
+  "exports": { "./*.json": "./src/*.json", "./*": "./src/*.tsx" },
   "scripts": {
     "format": "biome format --write",
     "lint": "biome lint --write",

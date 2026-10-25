@@ -1,9 +1,9 @@
+import palette from '@joyfui/ui/shared/palette.json';
 import UIProvider from '@joyfui/ui/theme/UIProvider';
 import type { PaletteOptions } from '@mui/material/styles';
 import type { PropsWithChildren } from 'react';
 
 import useStore from './hooks/useStore';
-import palette from './shared/palette.json';
 
 const AppUIProvider = ({ children }: PropsWithChildren) => {
   const [streamerId] = useStore('setup.streamerId');
