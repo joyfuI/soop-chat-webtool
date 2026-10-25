@@ -84,7 +84,13 @@ const Progress = () => {
         sx={{
           fontSize,
           '& code': {
+            px: 0.5,
             backgroundColor: theme.alpha(theme.palette.primary.main, 0.2),
+            fontFamily: 'inherit',
+            fontWeight: 600,
+            border: '1px solid',
+            borderColor: 'divider',
+            borderRadius: 0.5,
           },
         }}
       >
