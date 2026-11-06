@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parentPort, workerData } from 'node:worker_threads';
 
+import { ChatQueue } from './chat-queue.ts';
 import {
   ApiError,
   initializeSettings,
@@ -9,33 +10,41 @@ import {
   StreamerStore,
 } from './storage.ts';
 
-const { dataDir, secretKey, streamerId } = workerData;
+const { dataDir, secretKey, streamerId, queue } = workerData;
 let settings: DatabaseSync | undefined;
-let store: Store | StreamerStore;
+let store: Store | StreamerStore | ChatQueue;
 const methods = new Set(
-  streamerId
+  queue
     ? [
-        'saveEvent',
-        'markEnded',
-        'listBroadcasts',
-        'findBroadcast',
-        'listExpiredBroadcasts',
+        'queueState',
+        'appendWrites',
+        'nextWrites',
+        'discardWrites',
+        'hasQueuedBroadcast',
       ]
-    : [
-        'prepareStreamer',
-        'addStreamer',
-        'getStreamer',
-        'listStreamers',
-        'updateStreamer',
-        'setEnabled',
-        'removeStreamer',
-        'getSettings',
-        'getCredentials',
-        'updateCredentials',
-        'databasePath',
-      ],
+    : streamerId
+      ? [
+          'applyQueuedWrites',
+          'listBroadcasts',
+          'findBroadcast',
+          'listExpiredBroadcasts',
+        ]
+      : [
+          'prepareStreamer',
+          'addStreamer',
+          'getStreamer',
+          'listStreamers',
+          'updateStreamer',
+          'setEnabled',
+          'removeStreamer',
+          'getSettings',
+          'getCredentials',
+          'updateCredentials',
+          'databasePath',
+        ],
 );
-if (streamerId) store = new StreamerStore(dataDir, streamerId);
+if (queue) store = new ChatQueue(dataDir);
+else if (streamerId) store = new StreamerStore(dataDir, streamerId);
 else {
   settings = new DatabaseSync(join(dataDir, '_settings.db'));
   initializeSettings(settings);

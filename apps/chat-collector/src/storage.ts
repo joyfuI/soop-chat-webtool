@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import type { QueuedEntry } from './chat-queue.ts';
 import {
   ApiError,
   type Broadcast,
@@ -359,7 +360,15 @@ export class StreamerStore {
     this.db = new DatabaseSync(join(dataDir, `${streamerId}.db`));
     try {
       configureDatabase(this.db);
-      this.db.exec(broadcastSchema);
+      this.db.exec(
+        broadcastSchema +
+          `
+        CREATE TABLE IF NOT EXISTS _queue_cursor (
+          source TEXT PRIMARY KEY,
+          last_id INTEGER NOT NULL
+        ) STRICT;
+      `,
+      );
       this.broadcast = this.db.prepare(`
         INSERT INTO broadcasts VALUES (?, ?, ?, ?, NULL, 1)
         ON CONFLICT(broadcast_no) DO UPDATE SET
@@ -379,36 +388,69 @@ export class StreamerStore {
   saveEvent(broadcastNo: string, event: StoredEvent) {
     const data = JSON.stringify(event.data);
     if (data === undefined) throw new Error('이벤트 데이터가 없습니다.');
+    this.transaction(() => this.insertEvent(broadcastNo, { ...event, data }));
+  }
+
+  applyQueuedWrites(source: string, entries: QueuedEntry[]) {
+    this.transaction(() => {
+      const cursor = this.db
+        .prepare('SELECT last_id FROM _queue_cursor WHERE source = ?')
+        .get(source);
+      let lastId = Number(cursor?.last_id ?? 0);
+      for (const { id, write } of entries) {
+        if (id <= lastId) continue;
+        if ('event' in write) this.insertEvent(write.broadcastNo, write.event);
+        else this.markEnded(write.broadcastNo, write.endedAt);
+        lastId = id;
+      }
+      // The cursor must survive a crash between this commit and the queue acknowledgement.
+      this.db
+        .prepare(`
+        INSERT INTO _queue_cursor VALUES (?, ?)
+        ON CONFLICT(source) DO UPDATE SET last_id = excluded.last_id
+      `)
+        .run(source, lastId);
+    });
+  }
+
+  private insertEvent(
+    broadcastNo: string,
+    event: Omit<StoredEvent, 'data'> & { data: string },
+  ) {
+    this.broadcast.run(
+      broadcastNo,
+      this.streamerId,
+      event.receivedAt,
+      event.receivedAt,
+    );
+    this.event.run(
+      broadcastNo,
+      event.type,
+      event.opcode,
+      event.receivedAt,
+      event.data,
+      event.raw.flags,
+      event.raw.payload,
+    );
+  }
+
+  private transaction(action: () => void) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.broadcast.run(
-        broadcastNo,
-        this.streamerId,
-        event.receivedAt,
-        event.receivedAt,
-      );
-      this.event.run(
-        broadcastNo,
-        event.type,
-        event.opcode,
-        event.receivedAt,
-        data,
-        event.raw.flags,
-        event.raw.payload,
-      );
+      action();
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
       throw error;
     }
   }
 
-  markEnded(broadcastNo: string) {
+  markEnded(broadcastNo: string, endedAt = Date.now()) {
     this.db
       .prepare(
         'UPDATE broadcasts SET ended_at = ? WHERE broadcast_no = ? AND ended_at IS NULL',
       )
-      .run(Date.now(), broadcastNo);
+      .run(endedAt, broadcastNo);
   }
 
   listBroadcasts(): Broadcast[] {

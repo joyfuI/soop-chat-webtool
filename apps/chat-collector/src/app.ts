@@ -79,7 +79,16 @@ export async function buildApp(options: {
         allowedHeaders: ['Authorization', 'Content-Type'],
       });
     }
-    const store = await AsyncStore.open(options.dataDir, options.secretKey);
+    const store = await AsyncStore.open(
+      options.dataDir,
+      options.secretKey,
+      (streamerId, err) => {
+        app.log.error(
+          { streamerId, err },
+          '디스크 대기열의 SQLite 저장에 실패했습니다. 재시도합니다.',
+        );
+      },
+    );
     app.addHook('onClose', async () => store.close());
     const collector = new Collector(
       store,
@@ -135,7 +144,12 @@ export async function buildApp(options: {
               )
             )
               continue;
-            await store.deleteBroadcast(broadcast, shutdown.signal);
+            await store
+              .deleteBroadcast(broadcast, shutdown.signal)
+              .catch((error: unknown) => {
+                if (!(error instanceof ApiError && error.statusCode === 409))
+                  throw error;
+              });
             await setImmediate();
           }
         } catch {

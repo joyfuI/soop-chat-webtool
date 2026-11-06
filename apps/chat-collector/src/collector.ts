@@ -61,7 +61,7 @@ type Runner = {
   timer: ReturnType<typeof setTimeout> | undefined;
   attempt: Promise<void> | undefined;
   unsubscribe: (() => void)[];
-  writes: Map<Promise<void>, string>;
+  writes: Map<Promise<void>, Set<string>>;
 };
 
 export class Collector {
@@ -167,7 +167,10 @@ export class Collector {
         runner.state === 'connecting' &&
         !runner.broadcastNo
       ) &&
-      !(runner?.active && [...runner.writes.values()].includes(broadcastNo))
+      !(
+        runner?.active &&
+        [...runner.writes.values()].some((batch) => batch.has(broadcastNo))
+      )
     );
   }
 
@@ -211,24 +214,8 @@ export class Collector {
         context.signal.throwIfAborted();
         if (!current())
           throw new DOMException('Connection cancelled', 'AbortError');
-        if (
-          runner.lastBroadcastNo &&
-          runner.lastBroadcastNo !== channel.broadcastNo
-        ) {
-          try {
-            await this.write(
-              runner,
-              runner.lastBroadcastNo,
-              this.store.markEnded(id, runner.lastBroadcastNo),
-            );
-          } catch {
-            this.failStorage(runner);
-            throw new Error('방송 종료 저장에 실패했습니다.');
-          }
-        }
-        context.signal.throwIfAborted();
-        if (!current())
-          throw new DOMException('Connection cancelled', 'AbortError');
+        if (runner.lastBroadcastNo !== channel.broadcastNo)
+          this.endBroadcast(runner);
         runner.broadcastNo = channel.broadcastNo;
         runner.lastBroadcastNo = channel.broadcastNo;
         return channel;
@@ -266,14 +253,7 @@ export class Collector {
       }),
       runner.chat.on('ended', ({ reason }) => {
         if (!current()) return;
-        if (reason === 'offline' && runner.lastBroadcastNo) {
-          this.write(
-            runner,
-            runner.lastBroadcastNo,
-            this.store.markEnded(streamer.streamer_id, runner.lastBroadcastNo),
-          );
-          runner.lastBroadcastNo = null;
-        }
+        if (reason === 'offline') this.endBroadcast(runner);
         runner.broadcastNo = null;
         this.schedule(runner);
       }),
@@ -294,8 +274,6 @@ export class Collector {
     if (!runner.blockedBroadcastNo) runner.state = 'connecting';
     let broadcastNo: string | null = null;
     runner.attempt = (async () => {
-      await this.store.waitForWrites(id);
-      if (!runner.active || runner.fatal) return;
       const signal = AbortSignal.any([
         runner.controller.signal,
         AbortSignal.timeout(10_000),
@@ -303,20 +281,7 @@ export class Collector {
       broadcastNo = await this.lookupBroadcast(id, signal);
       signal.throwIfAborted();
       if (!runner.active || runner.fatal) return;
-      if (runner.lastBroadcastNo && runner.lastBroadcastNo !== broadcastNo) {
-        try {
-          await this.write(
-            runner,
-            runner.lastBroadcastNo,
-            this.store.markEnded(id, runner.lastBroadcastNo),
-          );
-          runner.lastBroadcastNo = null;
-        } catch {
-          this.failStorage(runner);
-          return;
-        }
-      }
-      if (!runner.active || runner.fatal) return;
+      if (runner.lastBroadcastNo !== broadcastNo) this.endBroadcast(runner);
       if (runner.blockedBroadcastNo) {
         if (!broadcastNo || broadcastNo === runner.blockedBroadcastNo) return;
         runner.blockedBroadcastNo = null;
@@ -336,28 +301,14 @@ export class Collector {
       }
       await runner.chat.connect();
     })()
-      .catch(async (error: unknown) => {
+      .catch((error: unknown) => {
         if (!runner.active || runner.fatal) return;
         if (runner.blockedBroadcastNo) return;
         runner.broadcastNo = null;
         if (error instanceof BroadcastOfflineError) {
           runner.state = 'waiting';
           runner.lastError = null;
-          if (runner.lastBroadcastNo) {
-            try {
-              await this.write(
-                runner,
-                runner.lastBroadcastNo,
-                this.store.markEnded(
-                  runner.streamer.streamer_id,
-                  runner.lastBroadcastNo,
-                ),
-              );
-              runner.lastBroadcastNo = null;
-            } catch {
-              this.failStorage(runner);
-            }
-          }
+          this.endBroadcast(runner);
         } else {
           runner.state = 'error';
           runner.lastError = {
@@ -379,13 +330,28 @@ export class Collector {
   }
 
   private write(runner: Runner, broadcastNo: string, request: Promise<void>) {
-    runner.writes.set(request, broadcastNo);
+    const batch = runner.writes.get(request);
+    if (batch) {
+      batch.add(broadcastNo);
+      return;
+    }
+    runner.writes.set(request, new Set([broadcastNo]));
     void request
       .catch(() => {
         if (runner.active) this.failStorage(runner);
       })
       .finally(() => runner.writes.delete(request));
-    return request;
+  }
+
+  private endBroadcast(runner: Runner) {
+    const broadcastNo = runner.lastBroadcastNo;
+    if (!broadcastNo) return;
+    runner.lastBroadcastNo = null;
+    this.write(
+      runner,
+      broadcastNo,
+      this.store.markEnded(runner.streamer.streamer_id, broadcastNo),
+    );
   }
 
   private saveEvent(runner: Runner, event: StoredEvent) {
@@ -434,11 +400,16 @@ export class Collector {
     await Promise.allSettled([...runner.writes.keys()]);
   }
 
-  async stop(id: string) {
+  private async detach(id: string) {
     const runner = this.runners.get(id);
     if (!runner) return;
     this.runners.delete(id);
     await this.dispose(runner);
+  }
+
+  async stop(id: string) {
+    await this.detach(id);
+    await this.store.waitForWrites(id);
   }
 
   async restart(id: string) {
@@ -447,7 +418,7 @@ export class Collector {
     try {
       const lastBroadcastNo =
         this.runners.get(canonical)?.lastBroadcastNo ?? null;
-      await this.stop(canonical);
+      await this.detach(canonical);
       if (this.closing) return;
       const streamer = await this.store.getStreamer(canonical, false);
       if (streamer.registered && streamer.enabled)

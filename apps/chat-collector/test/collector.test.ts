@@ -274,7 +274,116 @@ test('blocked SQLite writes keep control APIs responsive and stop drains ordered
   }
 });
 
-test('streamer workers isolate locked writes and crashes, reuse case aliases, and recover on retry', {
+test('a new broadcast connects and journals more than 10,000 events while SQLite is locked', {
+  timeout: 15_000,
+}, async (t) => {
+  let broadcastNo = '1001';
+  const f = await fixture(
+    t,
+    async () => channel(broadcastNo),
+    [],
+    async () => broadcastNo,
+  );
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  const db = f.store.getDatabase('user123');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    await f.backend.saveEvent('user123', '1001', event());
+    broadcastNo = '1002';
+    const connected = new Promise<void>((resolve) => {
+      const off = chat.on('stateChange', ({ current }) => {
+        if (current !== 'connected') return;
+        off();
+        resolve();
+      });
+    });
+    chat.transition('closed');
+    t.mock.timers.tick(10_000);
+    await connected;
+    assert.equal(
+      f.collector.status(f.store.getStreamer('user123')).broadcastNo,
+      '1002',
+    );
+    for (let batch = 0; batch < 11; batch++) {
+      for (let index = 0; index < 999; index++) chat.emit('event', event());
+      await f.backend.saveEvent('user123', '1002', event());
+    }
+    assert.equal(
+      f.collector.status(f.store.getStreamer('user123')).state,
+      'collecting',
+    );
+    assert.throws(
+      () => f.store.findBroadcast('1002'),
+      /방송을 찾을 수 없습니다/,
+    );
+  } finally {
+    db.exec('ROLLBACK');
+    t.mock.timers.reset();
+  }
+  await f.backend.waitForWrites('user123');
+  assert.equal(f.store.findBroadcast('1001').event_count, 2);
+  assert.ok(f.store.findBroadcast('1001').ended_at);
+  assert.equal(f.store.findBroadcast('1002').event_count, 11_001);
+});
+
+test('reopening the collector replays a failed batch and skips a committed batch whose queue acknowledgement failed', async (t) => {
+  const f = await fixture(t);
+  for (const id of ['alpha123', 'beta123'])
+    await f.backend.addStreamer(id, null);
+  const alpha = f.store.getDatabase('alpha123');
+  alpha.exec(
+    "CREATE TRIGGER block_batch BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+  );
+  const queue = Reflect.get(f.backend, 'queue') as {
+    call(method: string, args?: unknown[]): Promise<unknown>;
+  };
+  const call = queue.call.bind(queue);
+  t.mock.method(queue, 'call', (method: string, args?: unknown[]) => {
+    if (method === 'discardWrites')
+      return Promise.reject(new Error('lost acknowledgement'));
+    return call(method, args);
+  });
+  await Promise.all([
+    f.backend.saveEvent('alpha123', '1001', event()),
+    f.backend.saveEvent('beta123', '1002', event()),
+  ]);
+  await f.backend.flush();
+  assert.throws(() => f.store.findBroadcast('1001'), /방송을 찾을 수 없습니다/);
+  const beta = f.store.findBroadcast('1002');
+  assert.equal(beta.event_count, 1);
+  await assert.rejects(f.backend.deleteBroadcast(beta), { statusCode: 409 });
+  const alphaPath = f.store.databasePath('alpha123');
+  await f.app.close();
+  const unlocked = new DatabaseSync(alphaPath);
+  try {
+    unlocked.exec('DROP TRIGGER block_batch');
+  } finally {
+    unlocked.close();
+  }
+  const reopened = await f.open();
+  await reopened.backend.flush();
+  assert.equal(reopened.store.findBroadcast('1001').event_count, 1);
+  assert.equal(reopened.store.findBroadcast('1002').event_count, 1);
+  const journal = new DatabaseSync(join(f.dataDir, '_chat-queue.db'), {
+    readOnly: true,
+  });
+  try {
+    assert.equal(
+      journal.prepare('SELECT count(*) AS count FROM queued_writes').get()
+        ?.count,
+      0,
+    );
+  } finally {
+    journal.close();
+  }
+});
+
+test('streamer workers isolate locked writes and recover automatically after a worker crash', {
   timeout: 10_000,
 }, async (t) => {
   const broadcastNo = (id: string) => (id === 'alpha123' ? '1001' : '1002');
@@ -296,7 +405,10 @@ test('streamer workers isolate locked writes and crashes, reuse case aliases, an
   assert.ok(alpha && beta);
   const workers = Reflect.get(f.backend, 'streamers') as Map<
     string,
-    Promise<{ worker: Worker; call(method: string): Promise<unknown> }>
+    Promise<{
+      worker: Worker;
+      call(method: string, args?: unknown[]): Promise<unknown>;
+    }>
   >;
   const alphaWorker = await workers.get('alpha123');
   const betaWorker = await workers.get('beta123');
@@ -336,8 +448,12 @@ test('streamer workers isolate locked writes and crashes, reuse case aliases, an
   const exited = new Promise<void>((resolve) =>
     alphaWorker.worker.once('exit', () => resolve()),
   );
-  // An invalid message causes a real worker failure before the queued event.
-  alphaWorker.worker.postMessage(null);
+  const apply = alphaWorker.call.bind(alphaWorker);
+  t.mock.method(alphaWorker, 'call', (method: string, args?: unknown[]) => {
+    // Crash the worker after the queue commit and before the batch is applied.
+    if (method === 'applyQueuedWrites') alphaWorker.worker.postMessage(null);
+    return apply(method, args);
+  });
   alpha.emit('event', event());
   beta.emit('event', event());
   await Promise.all([
@@ -346,21 +462,19 @@ test('streamer workers isolate locked writes and crashes, reuse case aliases, an
     exited,
   ]);
   const states = (await f.call('GET', '/api/streamers')).json();
-  assert.equal(states[0].lastError.code, 'STORAGE_ERROR');
+  assert.equal(states[0].state, 'collecting');
   assert.equal(states[1].state, 'collecting');
   assert.equal((await f.call('GET', '/api/settings')).statusCode, 200);
   assert.equal(f.store.findBroadcast('1002').event_count, betaCount + 21);
   assert.equal(workers.has('alpha123'), false);
-  assert.equal(
-    (await f.call('POST', '/api/collection/start/alpha123')).statusCode,
-    200,
-  );
+  await setTimeout(1_050);
   await flush();
   const recovered = await workers.get('alpha123');
   assert.ok(recovered);
   assert.notEqual(recovered.worker, alphaWorker.worker);
   assert.equal(await workers.get('beta123'), betaWorker);
   assert.equal(f.store.findBroadcast('1001').event_count, alphaCount + 21);
+  assert.equal(alpha.connections, 1);
   assert.equal(
     (await f.call('GET', '/api/streamers')).json()[0].state,
     'collecting',
@@ -373,6 +487,7 @@ test('deletion waits outside the main thread, serializes writes, and exports can
   const f = await fixture(t);
   await f.call('POST', '/api/streamers', { streamerId: 'user123' });
   await f.backend.saveEvent('user123', 'old', event());
+  await f.backend.waitForWrites('user123');
   const broadcast = await f.backend.findBroadcast('old');
   const path = await f.backend.databasePath('user123');
   const db = f.store.getDatabase('user123');
@@ -384,20 +499,20 @@ test('deletion waits outside the main thread, serializes writes, and exports can
     (error: unknown) => (error as { statusCode: number }).statusCode === 499,
   );
   const writing = f.backend.saveEvent('user123', 'new', event());
-  let written = false;
-  void writing.then(() => {
-    written = true;
-  });
   try {
+    await writing;
     await setTimeout(250);
     assert.equal((await f.call('GET', '/api/streamers')).statusCode, 200);
-    assert.equal(written, false);
+    assert.throws(
+      () => f.store.findBroadcast('new'),
+      /방송을 찾을 수 없습니다/,
+    );
     controller.abort();
     await cancellation;
   } finally {
     db.exec('ROLLBACK');
   }
-  await writing;
+  await f.backend.waitForWrites('user123');
   assert.equal(f.store.findBroadcast('old').event_count, 1);
   assert.equal(f.store.findBroadcast('new').event_count, 1);
   await f.backend.deleteBroadcast(broadcast);
@@ -1281,9 +1396,11 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   await flush();
   assert.equal(calls, 4);
   assert.equal(f.store.findBroadcast('1002').event_count, 3);
-  db.exec(
-    "CREATE TRIGGER fail_insert BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+  const queue = new DatabaseSync(join(f.dataDir, '_chat-queue.db'));
+  queue.exec(
+    "CREATE TRIGGER fail_insert BEFORE INSERT ON queued_writes BEGIN SELECT RAISE(ABORT, 'blocked'); END",
   );
+  queue.close();
   const previousCount = f.store.findBroadcast('1002').event_count;
   chat.emit('event', event());
   await flush();
@@ -1292,7 +1409,9 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   t.mock.timers.tick(20_000);
   await flush();
   assert.equal(calls, 4);
-  db.exec('DROP TRIGGER fail_insert');
+  const unlockedQueue = new DatabaseSync(join(f.dataDir, '_chat-queue.db'));
+  unlockedQueue.exec('DROP TRIGGER fail_insert');
+  unlockedQueue.close();
   assert.equal(f.store.findBroadcast('1002').event_count, previousCount);
   f.collector.start(f.store.getStreamer('user123'));
   await flush();

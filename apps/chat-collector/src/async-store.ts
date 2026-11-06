@@ -1,5 +1,8 @@
+import { clearTimeout, setTimeout } from 'node:timers';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Worker } from 'node:worker_threads';
 
+import type { QueuedEntry, QueuedWrite } from './chat-queue.ts';
 import { runDatabaseJob } from './query.ts';
 import type { Store } from './storage.ts';
 import {
@@ -23,7 +26,8 @@ class StoreWorker {
   constructor(
     options:
       | { dataDir: string; secretKey: Buffer }
-      | { dataDir: string; streamerId: string },
+      | { dataDir: string; streamerId: string }
+      | { dataDir: string; queue: true },
     onExit?: () => void,
   ) {
     this.worker = new Worker(new URL('./store-worker.ts', import.meta.url), {
@@ -84,28 +88,60 @@ class StoreWorker {
   }
 }
 
+type Ingress = {
+  entries: QueuedWrite[];
+  sealed: boolean;
+  saved: Promise<void>;
+};
+
 export class AsyncStore {
   readonly dataDir: string;
   private metadata!: StoreWorker;
+  private queue!: StoreWorker;
+  private queueSource!: string;
   private readonly streamers = new Map<string, Promise<StoreWorker>>();
   private closing = false;
-  private readonly pendingEvents = new Map<string, number>();
+  private readonly ingress = new Map<string, Ingress>();
+  private readonly unpersisted = new Map<string, number>();
+  private readonly drains = new Map<string, Promise<void>>();
+  private readonly dirty = new Set<string>();
+  private readonly retries = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly drainErrors = new Set<string>();
   private readonly writes = new Map<string, Promise<unknown>>();
   private readonly requests = new Set<Promise<unknown>>();
   private readonly shutdown = new AbortController();
+  private readonly reportDrainError: (
+    streamerId: string,
+    error: unknown,
+  ) => void;
 
-  private constructor(dataDir: string) {
+  private constructor(
+    dataDir: string,
+    reportDrainError: (streamerId: string, error: unknown) => void,
+  ) {
     this.dataDir = dataDir;
+    this.reportDrainError = reportDrainError;
   }
 
-  static async open(dataDir: string, secretKey: Buffer) {
-    const store = new AsyncStore(dataDir);
+  static async open(
+    dataDir: string,
+    secretKey: Buffer,
+    reportDrainError: (streamerId: string, error: unknown) => void,
+  ) {
+    const store = new AsyncStore(dataDir, reportDrainError);
     try {
       store.metadata = new StoreWorker({ dataDir, secretKey });
-      await store.metadata.ready;
+      store.queue = new StoreWorker({ dataDir, queue: true });
+      await Promise.all([store.metadata.ready, store.queue.ready]);
+      const { source, streamers } = await store.queue.call<{
+        source: string;
+        streamers: string[];
+      }>('queueState');
+      store.queueSource = source;
+      for (const id of streamers) store.scheduleDrain(id);
       return store;
     } catch (error) {
-      await Promise.allSettled([store.metadata?.close()]);
+      await Promise.allSettled([store.metadata?.close(), store.queue?.close()]);
       throw error;
     }
   }
@@ -266,46 +302,136 @@ export class AsyncStore {
     );
   }
   saveEvent(id: string, no: string, event: StoredEvent) {
-    // Bound the backlog when disk commits cannot keep up with incoming chat.
-    const key = id.toLowerCase();
-    if ((this.pendingEvents.get(key) ?? 0) >= 10_000)
-      return Promise.reject(
-        new ApiError(503, '채팅 저장 대기열이 가득 찼습니다.'),
-      );
-    let snapshot: StoredEvent;
     try {
-      snapshot = structuredClone({
-        type: event.type,
-        opcode: event.opcode,
-        receivedAt: event.receivedAt,
-        data: event.data,
-        raw: { flags: event.raw.flags, payload: event.raw.payload },
+      const data = JSON.stringify(event.data);
+      if (
+        data === undefined ||
+        !no ||
+        !Number.isSafeInteger(event.receivedAt) ||
+        typeof event.type !== 'string' ||
+        typeof event.opcode !== 'string' ||
+        typeof event.raw.flags !== 'string'
+      )
+        throw new Error('이벤트 데이터가 올바르지 않습니다.');
+      return this.enqueue(id, {
+        broadcastNo: no,
+        event: {
+          type: event.type,
+          opcode: event.opcode,
+          receivedAt: event.receivedAt,
+          data,
+          raw: {
+            flags: event.raw.flags,
+            payload: Uint8Array.from(event.raw.payload),
+          },
+        },
       });
     } catch {
       return Promise.reject(
         new ApiError(500, '채팅 저장 요청을 만들 수 없습니다.'),
       );
     }
-    this.pendingEvents.set(key, (this.pendingEvents.get(key) ?? 0) + 1);
-    const request = this.write(id, () =>
-      this.streamerRequest<void>(id, 'saveEvent', no, snapshot),
-    );
-    void request
-      .finally(() => {
-        const remaining = (this.pendingEvents.get(key) ?? 1) - 1;
-        if (remaining) this.pendingEvents.set(key, remaining);
-        else this.pendingEvents.delete(key);
-      })
-      .catch(() => {});
-    return request;
   }
+
   markEnded(id: string, no: string) {
-    return this.write(id, () =>
-      this.streamerRequest<void>(id, 'markEnded', no),
-    );
+    return this.enqueue(id, { broadcastNo: no, endedAt: Date.now() });
   }
+
+  private enqueue(id: string, entry: QueuedWrite) {
+    if (this.closing)
+      return Promise.reject(new ApiError(503, 'DB를 종료하고 있습니다.'));
+    const key = id.toLowerCase();
+    const count = this.unpersisted.get(key) ?? 0;
+    if (count >= 10_000)
+      return Promise.reject(
+        new ApiError(503, '디스크 대기열 기록이 지연되고 있습니다.'),
+      );
+    this.unpersisted.set(key, count + 1);
+    const current = this.ingress.get(key);
+    if (current && !current.sealed) {
+      current.entries.push(entry);
+      return current.saved;
+    }
+    const batch: Ingress = {
+      entries: [entry],
+      sealed: false,
+      saved: this.track(
+        delay(20)
+          .then(async () => {
+            batch.sealed = true;
+            await this.queue.call('appendWrites', [key, batch.entries]);
+            this.scheduleDrain(key);
+          })
+          .finally(() => {
+            const remaining =
+              (this.unpersisted.get(key) ?? 0) - batch.entries.length;
+            if (remaining) this.unpersisted.set(key, remaining);
+            else this.unpersisted.delete(key);
+            if (this.ingress.get(key) === batch) this.ingress.delete(key);
+          }),
+      ),
+    };
+    this.ingress.set(key, batch);
+    return batch.saved;
+  }
+
+  private scheduleDrain(id: string) {
+    this.dirty.add(id);
+    if (this.drains.has(id) || this.retries.has(id)) return;
+    this.drains.set(id, this.track(this.drain(id)));
+  }
+
+  private async drain(id: string) {
+    try {
+      // Allow several durable appends to share one destination transaction.
+      await delay(100);
+      do {
+        this.dirty.delete(id);
+        const applied = await this.write(id, async () => {
+          const entries = await this.queue.call<QueuedEntry[]>('nextWrites', [
+            id,
+          ]);
+          const last = entries.at(-1);
+          if (!last) return false;
+          await this.streamerRequest<void>(
+            id,
+            'applyQueuedWrites',
+            this.queueSource,
+            entries,
+          );
+          await this.queue.call('discardWrites', [id, last.id]);
+          return true;
+        });
+        if (applied) this.dirty.add(id);
+        this.drainErrors.delete(id);
+      } while (this.dirty.has(id));
+    } catch (error) {
+      if (!this.drainErrors.has(id)) this.reportDrainError(id, error);
+      this.drainErrors.add(id);
+      if (!this.shutdown.signal.aborted) {
+        const retry = setTimeout(() => {
+          this.retries.delete(id);
+          this.scheduleDrain(id);
+        }, 1_000).unref();
+        this.retries.set(id, retry);
+      }
+    } finally {
+      this.drains.delete(id);
+    }
+  }
+
   deleteBroadcast(broadcast: Broadcast, signal?: AbortSignal) {
+    const key = broadcast.streamer_id.toLowerCase();
+    const pending = this.ingress.get(key)?.saved;
     return this.write(broadcast.streamer_id, async () => {
+      await pending?.catch(() => {});
+      if (
+        await this.queue.call<boolean>('hasQueuedBroadcast', [
+          key,
+          broadcast.broadcast_no,
+        ])
+      )
+        throw new ApiError(409, '이 방송의 채팅을 저장 중입니다.');
       const path = await this.databasePath(broadcast.streamer_id);
       await runDatabaseJob(
         { operation: 'delete', path, broadcastNo: broadcast.broadcast_no },
@@ -317,13 +443,22 @@ export class AsyncStore {
   }
   async waitForWrites(id: string) {
     const key = id.toLowerCase();
-    while (this.writes.has(key)) await this.writes.get(key)?.catch(() => {});
+    for (;;) {
+      const pending =
+        this.ingress.get(key)?.saved ??
+        this.drains.get(key) ??
+        this.writes.get(key);
+      if (!pending) return;
+      await pending.catch(() => {});
+    }
   }
   async flush() {
     while (this.requests.size) await Promise.allSettled([...this.requests]);
   }
   async close() {
     this.shutdown.abort();
+    for (const timer of this.retries.values()) clearTimeout(timer);
+    this.retries.clear();
     await this.flush();
     this.closing = true;
     await Promise.all([
@@ -331,6 +466,7 @@ export class AsyncStore {
         (await worker).close(),
       ),
       this.metadata.close(),
+      this.queue.close(),
     ]);
   }
 }
