@@ -8,10 +8,10 @@ SOOP 계정, 스트리머 설정과 수집 시작·중지, 방송 기록, 읽기
 
 `apps/chat-collector-admin/.env.example`을 `.env.local`로 복사해 설정합니다.
 
-| 환경변수 | 설명 |
-| --- | --- |
+| 환경변수                 | 설명                                                             |
+| ------------------------ | ---------------------------------------------------------------- |
 | `VITE_COLLECTOR_API_URL` | `/api` 앞까지의 collector 서버 주소. 예: `http://localhost:3000` |
-| `VITE_COLLECTOR_API_KEY` | collector의 `COLLECTOR_API_KEY`와 동일한 키 |
+| `VITE_COLLECTOR_API_KEY` | collector의 `COLLECTOR_API_KEY`와 동일한 키                      |
 
 브라우저가 API를 직접 호출하므로 **API 키는 빌드된 JavaScript와 요청 헤더에 포함됩니다.** 웹페이지에 접근할 수 있는 사람은 키를 확인할 수 있습니다. 키를 화면이나 localStorage에 별도로 저장하지는 않습니다. [Vite 환경변수 문서](https://vite.dev/guide/env-and-mode)
 
