@@ -59,6 +59,8 @@ type Runner = {
   fatal: boolean;
   controller: AbortController;
   timer: ReturnType<typeof setTimeout> | undefined;
+  check: AbortController | undefined;
+  offlineChecks: number;
   attempt: Promise<void> | undefined;
   unsubscribe: (() => void)[];
   writes: Map<Promise<void>, Set<string>>;
@@ -195,6 +197,8 @@ export class Collector {
       fatal: false,
       controller: new AbortController(),
       timer: undefined,
+      check: undefined,
+      offlineChecks: 0,
       attempt: undefined,
       unsubscribe: [],
       writes: new Map(),
@@ -246,9 +250,10 @@ export class Collector {
           runner.state = 'collecting';
           runner.lastError = null;
         } else if (state === 'closed') {
+          this.cancelPoll(runner);
           runner.broadcastNo = null;
           runner.state = 'waiting';
-          if (!runner.attempt) this.schedule(runner);
+          this.schedule(runner);
         }
       }),
       runner.chat.on('ended', ({ reason }) => {
@@ -268,18 +273,27 @@ export class Collector {
     this.attempt(runner);
   }
 
-  private attempt(runner: Runner) {
+  private async findBroadcast(runner: Runner, check?: AbortSignal) {
+    const signal = AbortSignal.any([
+      runner.controller.signal,
+      ...(check ? [check] : []),
+      AbortSignal.timeout(10_000),
+    ]);
+    const broadcastNo = await this.lookupBroadcast(
+      runner.streamer.streamer_id,
+      signal,
+    );
+    signal.throwIfAborted();
+    return broadcastNo;
+  }
+
+  private attempt(runner: Runner, confirmedBroadcastNo?: string) {
     if (!runner.active || runner.fatal || runner.attempt) return;
     const id = runner.streamer.streamer_id;
     if (!runner.blockedBroadcastNo) runner.state = 'connecting';
     let broadcastNo: string | null = null;
     runner.attempt = (async () => {
-      const signal = AbortSignal.any([
-        runner.controller.signal,
-        AbortSignal.timeout(10_000),
-      ]);
-      broadcastNo = await this.lookupBroadcast(id, signal);
-      signal.throwIfAborted();
+      broadcastNo = confirmedBroadcastNo ?? (await this.findBroadcast(runner));
       if (!runner.active || runner.fatal) return;
       if (runner.lastBroadcastNo !== broadcastNo) this.endBroadcast(runner);
       if (runner.blockedBroadcastNo) {
@@ -325,7 +339,44 @@ export class Collector {
       })
       .finally(() => {
         runner.attempt = undefined;
-        if (runner.state !== 'collecting') this.schedule(runner);
+        this.schedule(runner);
+      });
+  }
+
+  private checkBroadcast(runner: Runner) {
+    const currentBroadcastNo = runner.broadcastNo;
+    if (
+      !runner.active ||
+      runner.fatal ||
+      runner.state !== 'collecting' ||
+      !currentBroadcastNo
+    )
+      return;
+    const check = new AbortController();
+    runner.check = check;
+    runner.attempt = (async () => {
+      const broadcastNo = await this.findBroadcast(runner, check.signal);
+      check.signal.throwIfAborted();
+      if (broadcastNo === currentBroadcastNo) {
+        runner.offlineChecks = 0;
+        return null;
+      }
+      if (broadcastNo === null && ++runner.offlineChecks < 2) return null;
+
+      await runner.chat.disconnect();
+      if (!runner.active || runner.fatal) return null;
+      this.endBroadcast(runner);
+      return broadcastNo;
+    })()
+      .catch(() => {
+        runner.offlineChecks = 0;
+        return null;
+      })
+      .then((broadcastNo) => {
+        runner.check = undefined;
+        runner.attempt = undefined;
+        if (broadcastNo === null) this.schedule(runner);
+        else this.attempt(runner, broadcastNo);
       });
   }
 
@@ -370,10 +421,23 @@ export class Collector {
   private schedule(runner: Runner) {
     if (!runner.active || runner.fatal || runner.timer || runner.attempt)
       return;
-    runner.timer = setTimeout(() => {
-      runner.timer = undefined;
-      this.attempt(runner);
-    }, 10_000);
+    const collecting =
+      runner.state === 'collecting' && runner.broadcastNo !== null;
+    runner.timer = setTimeout(
+      () => {
+        runner.timer = undefined;
+        if (collecting) this.checkBroadcast(runner);
+        else this.attempt(runner);
+      },
+      collecting ? 30_000 : 10_000,
+    );
+  }
+
+  private cancelPoll(runner: Runner) {
+    runner.check?.abort();
+    runner.offlineChecks = 0;
+    if (runner.timer) clearTimeout(runner.timer);
+    runner.timer = undefined;
   }
 
   private failStorage(runner: Runner) {
@@ -385,8 +449,7 @@ export class Collector {
       message:
         '채팅 저장에 실패했습니다. 수집 시작 API로 다시 시도할 수 있습니다.',
     };
-    if (runner.timer) clearTimeout(runner.timer);
-    runner.timer = undefined;
+    this.cancelPoll(runner);
     runner.broadcastNo = null;
     void runner.chat.disconnect().catch(() => {});
   }
@@ -394,7 +457,7 @@ export class Collector {
   private async dispose(runner: Runner) {
     runner.active = false;
     runner.controller.abort();
-    if (runner.timer) clearTimeout(runner.timer);
+    this.cancelPoll(runner);
     for (const off of runner.unsubscribe) off();
     await runner.chat.disconnect().catch(() => {});
     await Promise.allSettled([...runner.writes.keys()]);

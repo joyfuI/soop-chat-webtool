@@ -284,13 +284,13 @@ test('a new broadcast connects and journals more than 10,000 events while SQLite
     [],
     async () => broadcastNo,
   );
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   await f.call('POST', '/api/streamers', { streamerId: 'user123' });
   await f.call('POST', '/api/collection/start/user123');
   await flush();
   const chat = f.chats[0];
   assert.ok(chat);
   const db = f.store.getDatabase('user123');
-  t.mock.timers.enable({ apis: ['setTimeout'] });
   db.exec('BEGIN IMMEDIATE');
   try {
     await f.backend.saveEvent('user123', '1001', event());
@@ -1942,6 +1942,133 @@ test('ordinary connection failures retry at 10 seconds; one restricted streamer 
     f.collector.status(f.store.getStreamer('user123')).state,
     'collecting',
   );
+});
+
+test('collecting stays connected until two consecutive offline checks succeed', async (t) => {
+  let publicBroadcast: string | null | Error = '1001';
+  let polls = 0;
+  const f = await fixture(t, undefined, [], async () => {
+    polls++;
+    if (publicBroadcast instanceof Error) throw publicBroadcast;
+    return publicBroadcast;
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const [chat] = f.chats;
+  assert.ok(chat);
+  const status = () => f.collector.status(f.store.getStreamer('user123'));
+
+  t.mock.timers.tick(29_999);
+  await flush();
+  assert.equal(polls, 1);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(polls, 2);
+  for (const result of [
+    null,
+    new DOMException('Timed out', 'TimeoutError'),
+    null,
+    '1001',
+    null,
+  ]) {
+    publicBroadcast = result;
+    t.mock.timers.tick(30_000);
+    await flush();
+    assert.equal(chat.disconnections, 0);
+    assert.equal(status().state, 'collecting');
+    assert.equal(status().lastError, null);
+    assert.equal(f.store.findBroadcast('1001').ended_at, null);
+  }
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(chat.disconnections, 1);
+  assert.equal(status().state, 'waiting');
+  assert.equal(status().broadcastNo, null);
+  assert.ok(f.store.findBroadcast('1001').ended_at);
+
+  const offlinePolls = polls;
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(polls, offlinePolls + 1);
+  assert.equal(chat.connections, 1);
+});
+
+test('collecting switches immediately when the public broadcast number changes', async (t) => {
+  let broadcastNo = '1001';
+  let polls = 0;
+  const f = await fixture(
+    t,
+    async () => channel(broadcastNo),
+    [],
+    async () => {
+      polls++;
+      return broadcastNo;
+    },
+  );
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  broadcastNo = '1002';
+  t.mock.timers.tick(30_000);
+  await flush();
+  const [chat] = f.chats;
+  assert.ok(chat);
+  assert.equal(polls, 2);
+  assert.equal(chat.disconnections, 1);
+  assert.equal(chat.connections, 2);
+  const status = f.collector.status(f.store.getStreamer('user123'));
+  assert.equal(status.state, 'collecting');
+  assert.equal(status.broadcastNo, '1002');
+  assert.ok(f.store.findBroadcast('1001').ended_at);
+  assert.equal(f.store.findBroadcast('1002').event_count, 1);
+});
+
+test('closing a collecting connection aborts its check and ignores a stale broadcast number', async (t) => {
+  let holdCheck = false;
+  let pendingSignal: AbortSignal | undefined;
+  let polls = 0;
+  const f = await fixture(t, undefined, [], async (_id, signal) => {
+    polls++;
+    if (!holdCheck) return '1001';
+    pendingSignal = signal;
+    return new Promise((resolve) => {
+      signal.addEventListener('abort', () => resolve('1002'), { once: true });
+    });
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const [chat] = f.chats;
+  assert.ok(chat);
+  holdCheck = true;
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(pendingSignal?.aborted, false);
+
+  holdCheck = false;
+  chat.transition('closed');
+  await flush();
+  assert.equal(pendingSignal?.aborted, true);
+  assert.equal(chat.connections, 1);
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(chat.connections, 2);
+  assert.equal(f.store.findBroadcast('1001').ended_at, null);
+
+  holdCheck = true;
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(pendingSignal?.aborted, false);
+  await f.call('POST', '/api/collection/stop/user123');
+  assert.equal(pendingSignal?.aborted, true);
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(polls, 4);
+  assert.equal(chat.connections, 2);
 });
 
 test('stop and shutdown abort pending broadcast-number polls and release retry timers', async (t) => {
