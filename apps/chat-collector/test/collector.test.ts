@@ -1143,7 +1143,7 @@ test('retention protects resolving, collecting, retrying and asynchronous restar
   chat.transition('closed');
   t.mock.timers.tick(10_000);
   await flush();
-  assert.equal(f.collector.runners.has('user123'), false);
+  assert.equal(f.chats.length, 1);
   assert.equal(f.collector.canDeleteBroadcast('user123', '1001'), false);
   assert.equal(
     (await f.call('DELETE', '/api/broadcasts/1001')).statusCode,
@@ -1417,16 +1417,21 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
     errorCode: 'ERR_SQLITE_ERROR',
     sqliteCode: 1811,
   });
-  t.mock.timers.tick(20_000);
+  t.mock.timers.tick(9_999);
   await flush();
   assert.equal(calls, 4);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(calls, 5);
+  assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
   const unlockedQueue = new DatabaseSync(join(f.dataDir, '_chat-queue.db'));
   unlockedQueue.exec('DROP TRIGGER fail_insert');
   unlockedQueue.close();
   assert.equal(f.store.findBroadcast('1002').event_count, previousCount);
-  f.collector.start(f.store.getStreamer('user123'));
+  t.mock.timers.tick(10_000);
   await flush();
-  assert.equal(calls, 5);
+  assert.equal(calls, 6);
+  assert.equal(f.collector.status(streamer).state, 'collecting');
   await f.collector.stop('user123');
   const count = f.store.findBroadcast('1002').event_count;
   f.chats.at(-1)?.emit('event', event());
@@ -1434,10 +1439,12 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   t.mock.timers.reset();
 });
 
-test('storage stop logs the pending write limit once', async (t) => {
+test('storage stop logs the pending write limit once and manual stop cancels the retry', async (t) => {
   const f = await fixture(t);
   await f.app.ready();
   const streamer = f.store.addStreamer('user123', null);
+  f.store.setEnabled('user123', true);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   f.collector.start(streamer);
   await flush();
   const chat = f.chats[0];
@@ -1457,6 +1464,14 @@ test('storage stop logs the pending write limit once', async (t) => {
     pendingWrites: 10_000,
     writeLimit: 10_000,
   });
+  await f.call('POST', '/api/collection/stop/user123');
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(f.chats.length, 1);
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'stopped',
+  );
 });
 
 test('storage stop logs a failed streamer lookup with its target broadcast', async (t) => {
@@ -1478,6 +1493,84 @@ test('storage stop logs a failed streamer lookup with its target broadcast', asy
     errorCode: 'ERR_SQLITE_ERROR',
     sqliteCode: 1,
   });
+});
+
+test('a restarted queue worker replays a committed batch and collection resumes in the next broadcast', async (t) => {
+  let broadcastNo = '1001';
+  const f = await fixture(
+    t,
+    async () => channel(broadcastNo),
+    [],
+    async () => broadcastNo,
+  );
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  const queue = Reflect.get(f.backend, 'queue') as {
+    worker: Worker;
+    call(method: string, args?: unknown[]): Promise<unknown>;
+  };
+  const call = queue.call.bind(queue);
+  t.mock.method(queue, 'call', async (method: string, args?: unknown[]) => {
+    const result = await call(method, args);
+    if (method === 'appendWrites') {
+      await queue.worker.terminate();
+      throw new Error('lost acknowledgement');
+    }
+    return result;
+  });
+  chat.emit('event', event());
+  await flush();
+  const streamer = f.store.getStreamer('user123');
+  assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
+  assert.notEqual(Reflect.get(f.backend, 'queue'), queue);
+  assert.equal(f.store.findBroadcast('1001').event_count, 2);
+
+  broadcastNo = '1002';
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(f.collector.status(streamer).broadcastNo, '1002');
+  assert.equal(f.store.findBroadcast('1002').event_count, 1);
+  assert.equal(f.store.findBroadcast('1001').event_count, 2);
+  assert.ok(f.store.findBroadcast('1001').ended_at);
+});
+
+test('collection retries after the settings worker exits during reconnect', {
+  timeout: 10_000,
+}, async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  const metadata = Reflect.get(f.backend, 'metadata') as {
+    worker: Worker;
+    call(method: string, args?: unknown[]): Promise<unknown>;
+  };
+  const exited = new Promise<void>((resolve) =>
+    metadata.worker.once('exit', () => resolve()),
+  );
+  const call = metadata.call.bind(metadata);
+  t.mock.method(metadata, 'call', (method: string, args?: unknown[]) => {
+    if (method === 'getStreamer') metadata.worker.postMessage(null);
+    return call(method, args);
+  });
+  chat.transition('closed');
+  t.mock.timers.tick(10_000);
+  await exited;
+  await flush();
+  const streamer = f.store.getStreamer('user123');
+  assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.notEqual(Reflect.get(f.backend, 'metadata'), metadata);
+  assert.equal(f.collector.status(streamer).state, 'collecting');
+  assert.equal(f.store.findBroadcast('1001').event_count, 2);
 });
 
 test('restricted authentication refreshes once and collects without a manual retry', async (t) => {
@@ -2251,6 +2344,80 @@ test('room password changes and clearing preserve collection and apply on automa
     'latest',
     'next-start',
   ]);
+});
+
+test('a failed settings lookup while replacing a chat is retried with the updated password', async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  const runner = f.collector.runners.get('user123');
+  assert.ok(chat && runner);
+  await f.call('PATCH', '/api/streamers/user123', { roomPassword: 'changed' });
+
+  const getStreamer = f.backend.getStreamer.bind(f.backend);
+  let failReplacement = true;
+  t.mock.method(
+    f.backend,
+    'getStreamer',
+    (id: string, registeredOnly?: boolean) => {
+      if (registeredOnly === false && failReplacement) {
+        failReplacement = false;
+        return Promise.reject(new Error('settings unavailable'));
+      }
+      return getStreamer(id, registeredOnly);
+    },
+  );
+  chat.transition('closed');
+  t.mock.timers.tick(10_000);
+  await flush();
+  const streamer = f.store.getStreamer('user123');
+  assert.equal(f.collector.runners.get('user123'), runner);
+  assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
+  assert.equal(f.chats.length, 1);
+
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.equal(f.collector.status(streamer).state, 'collecting');
+  assert.equal(f.chats.length, 2);
+  assert.equal(f.chats[1]?.options.roomPassword, 'changed');
+  assert.equal(f.store.findBroadcast('1001').event_count, 2);
+});
+
+test('manually stopping while a password replacement disconnects cancels the replacement', async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await f.call('POST', '/api/collection/start/user123');
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  await f.call('PATCH', '/api/streamers/user123', { roomPassword: 'changed' });
+
+  const { promise: disconnected, resolve: finishDisconnect } =
+    Promise.withResolvers<void>();
+  const disconnect = chat.disconnect.bind(chat);
+  const calls = t.mock.method(chat, 'disconnect', () =>
+    calls.mock.callCount() === 0 ? disconnected : disconnect(),
+  );
+  chat.transition('closed');
+  t.mock.timers.tick(10_000);
+  try {
+    await flush();
+    assert.equal(calls.mock.callCount(), 1);
+    const stopped = await f.call('POST', '/api/collection/stop/user123');
+    assert.equal(stopped.statusCode, 200);
+  } finally {
+    finishDisconnect();
+  }
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(f.chats.length, 1);
+  const streamer = f.store.getStreamer('user123');
+  assert.equal(streamer.enabled, 0);
+  assert.equal(f.collector.status(streamer).state, 'stopped');
 });
 
 test('room password updates do not cancel an in-flight connection and are used after it disconnects', async (t) => {

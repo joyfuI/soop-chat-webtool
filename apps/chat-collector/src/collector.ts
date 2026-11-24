@@ -67,7 +67,7 @@ type Runner = {
   blockedBroadcastNo: string | null;
   lastError: { code: string; message: string } | null;
   active: boolean;
-  fatal: boolean;
+  storageFailed: boolean;
   controller: AbortController;
   timer: ReturnType<typeof setTimeout> | undefined;
   check: AbortController | undefined;
@@ -169,7 +169,7 @@ export class Collector {
     const runner = this.runners.get(id);
     return Boolean(
       runner?.active &&
-        !runner.fatal &&
+        !runner.storageFailed &&
         (runner.broadcastNo === broadcastNo ||
           runner.lastBroadcastNo === broadcastNo),
     );
@@ -195,12 +195,13 @@ export class Collector {
   start(streamer: Streamer, lastBroadcastNo: string | null = null) {
     if (this.closing) return;
     const previous = this.runners.get(streamer.streamer_id);
-    if (previous?.active && !previous.fatal && !previous.blockedBroadcastNo)
+    if (
+      previous?.active &&
+      !previous.storageFailed &&
+      !previous.blockedBroadcastNo
+    )
       return;
-    if (previous) {
-      lastBroadcastNo ??= previous.lastBroadcastNo;
-      void this.dispose(previous);
-    }
+    lastBroadcastNo ??= previous?.lastBroadcastNo ?? null;
     const runner: Runner = {
       streamer,
       chat: undefined as unknown as ReturnType<ChatFactory>,
@@ -210,7 +211,7 @@ export class Collector {
       blockedBroadcastNo: null,
       lastError: null,
       active: true,
-      fatal: false,
+      storageFailed: false,
       controller: new AbortController(),
       timer: undefined,
       check: undefined,
@@ -221,7 +222,7 @@ export class Collector {
     };
     const current = () =>
       runner.active &&
-      !runner.fatal &&
+      !runner.storageFailed &&
       this.runners.get(streamer.streamer_id) === runner;
     runner.chat = this.createChat({
       streamerId: streamer.streamer_id,
@@ -241,7 +242,6 @@ export class Collector {
         return channel;
       },
     });
-    this.runners.set(streamer.streamer_id, runner);
     runner.unsubscribe.push(
       runner.chat.on('event', (event) => {
         if (!current() || !runner.broadcastNo) return;
@@ -286,6 +286,8 @@ export class Collector {
           };
       }),
     );
+    this.runners.set(streamer.streamer_id, runner);
+    if (previous?.active) void this.dispose(previous);
     this.attempt(runner);
   }
 
@@ -304,13 +306,13 @@ export class Collector {
   }
 
   private attempt(runner: Runner, confirmedBroadcastNo?: string) {
-    if (!runner.active || runner.fatal || runner.attempt) return;
+    if (!runner.active || runner.storageFailed || runner.attempt) return;
     const id = runner.streamer.streamer_id;
     if (!runner.blockedBroadcastNo) runner.state = 'connecting';
     let broadcastNo: string | null = null;
     runner.attempt = (async () => {
       broadcastNo = confirmedBroadcastNo ?? (await this.findBroadcast(runner));
-      if (!runner.active || runner.fatal) return;
+      if (!runner.active || runner.storageFailed) return;
       if (runner.lastBroadcastNo !== broadcastNo) this.endBroadcast(runner);
       if (runner.blockedBroadcastNo) {
         if (!broadcastNo || broadcastNo === runner.blockedBroadcastNo) return;
@@ -319,23 +321,23 @@ export class Collector {
       if (!broadcastNo) throw new BroadcastOfflineError(id);
       const targetBroadcastNo = broadcastNo;
       runner.state = 'connecting';
+      let operation: StorageOperation = 'getStreamer';
       try {
         const streamer = await this.store.getStreamer(id);
-        if (!runner.active || runner.fatal) return;
+        if (!runner.active || runner.storageFailed) return;
         if (streamer.room_password !== runner.streamer.room_password) {
-          void this.restart(id).catch((error: unknown) =>
-            this.failStorage(runner, targetBroadcastNo, 'restart', error),
-          );
+          operation = 'restart';
+          await this.restart(id, runner);
           return;
         }
       } catch (error) {
-        this.failStorage(runner, targetBroadcastNo, 'getStreamer', error);
+        this.failStorage(runner, targetBroadcastNo, operation, error);
         return;
       }
       await runner.chat.connect();
     })()
       .catch((error: unknown) => {
-        if (!runner.active || runner.fatal) return;
+        if (!runner.active || runner.storageFailed) return;
         if (runner.blockedBroadcastNo) return;
         runner.broadcastNo = null;
         if (error instanceof BroadcastOfflineError) {
@@ -366,7 +368,7 @@ export class Collector {
     const currentBroadcastNo = runner.broadcastNo;
     if (
       !runner.active ||
-      runner.fatal ||
+      runner.storageFailed ||
       runner.state !== 'collecting' ||
       !currentBroadcastNo
     )
@@ -383,7 +385,7 @@ export class Collector {
       if (broadcastNo === null && ++runner.offlineChecks < 2) return null;
 
       await runner.chat.disconnect();
-      if (!runner.active || runner.fatal) return null;
+      if (!runner.active || runner.storageFailed) return null;
       this.endBroadcast(runner);
       return broadcastNo;
     })()
@@ -394,7 +396,7 @@ export class Collector {
       .then((broadcastNo) => {
         runner.check = undefined;
         runner.attempt = undefined;
-        if (broadcastNo === null) this.schedule(runner);
+        if (broadcastNo === null || runner.storageFailed) this.schedule(runner);
         else this.attempt(runner, broadcastNo);
       });
   }
@@ -446,18 +448,34 @@ export class Collector {
   }
 
   private schedule(runner: Runner) {
-    if (!runner.active || runner.fatal || runner.timer || runner.attempt)
-      return;
+    if (!runner.active || runner.timer || runner.attempt) return;
     const collecting =
       runner.state === 'collecting' && runner.broadcastNo !== null;
     runner.timer = setTimeout(
       () => {
         runner.timer = undefined;
-        if (collecting) this.checkBroadcast(runner);
+        if (runner.storageFailed) this.retryStorage(runner);
+        else if (collecting) this.checkBroadcast(runner);
         else this.attempt(runner);
       },
       collecting ? 30_000 : 10_000,
     );
+  }
+
+  private retryStorage(runner: Runner) {
+    const id = runner.streamer.streamer_id;
+    runner.attempt = this.store
+      .getStreamer(id, false)
+      .then(async (streamer) => {
+        if (!runner.active || this.runners.get(id) !== runner) return;
+        if (streamer.registered && streamer.enabled) this.start(streamer);
+        else await this.detach(id);
+      })
+      .catch(() => {})
+      .finally(() => {
+        runner.attempt = undefined;
+        this.schedule(runner);
+      });
   }
 
   private cancelPoll(runner: Runner) {
@@ -473,14 +491,20 @@ export class Collector {
     operation: StorageOperation,
     error: unknown,
   ) {
-    if (runner.fatal) return;
-    runner.fatal = true;
+    if (
+      this.closing ||
+      this.runners.get(runner.streamer.streamer_id) !== runner ||
+      runner.storageFailed
+    )
+      return;
+    // A replacement can fail after disconnecting the runner it was meant to replace.
+    runner.active = true;
+    runner.storageFailed = true;
     runner.controller.abort();
     runner.state = 'error';
     runner.lastError = {
       code: 'STORAGE_ERROR',
-      message:
-        '채팅 저장에 실패했습니다. 수집 시작 API로 다시 시도할 수 있습니다.',
+      message: '채팅 저장에 실패했습니다. 잠시 후 자동으로 다시 시도합니다.',
     };
     this.cancelPoll(runner);
     runner.broadcastNo = null;
@@ -491,6 +515,7 @@ export class Collector {
       operation,
       ...storageErrorDetails(error),
     });
+    this.schedule(runner);
   }
 
   private async dispose(runner: Runner) {
@@ -514,17 +539,21 @@ export class Collector {
     await this.store.waitForWrites(id);
   }
 
-  async restart(id: string) {
-    const canonical = (await this.store.getStreamer(id, false)).streamer_id;
+  async restart(id: string, expected?: Runner) {
+    const streamer = await this.store.getStreamer(id, false);
+    const canonical = streamer.streamer_id;
+    const previous = this.runners.get(canonical);
+    if (
+      this.closing ||
+      (expected && (expected !== previous || expected.storageFailed))
+    )
+      return;
     this.restarting.set(canonical, (this.restarting.get(canonical) ?? 0) + 1);
     try {
-      const lastBroadcastNo =
-        this.runners.get(canonical)?.lastBroadcastNo ?? null;
-      await this.detach(canonical);
-      if (this.closing) return;
-      const streamer = await this.store.getStreamer(canonical, false);
-      if (streamer.registered && streamer.enabled)
-        this.start(streamer, lastBroadcastNo);
+      if (previous?.active) await this.dispose(previous);
+      if (this.closing || this.runners.get(canonical) !== previous) return;
+      if (streamer.registered && streamer.enabled) this.start(streamer);
+      else this.runners.delete(canonical);
     } finally {
       const remaining = (this.restarting.get(canonical) ?? 1) - 1;
       if (remaining) this.restarting.set(canonical, remaining);

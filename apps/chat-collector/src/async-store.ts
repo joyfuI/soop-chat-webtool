@@ -120,9 +120,12 @@ type Ingress = {
 
 export class AsyncStore {
   readonly dataDir: string;
-  private metadata!: StoreWorker;
-  private queue!: StoreWorker;
-  private queueSource!: string;
+  private readonly secretKey: Buffer;
+  private metadata: StoreWorker | undefined;
+  private queue: StoreWorker | undefined;
+  private queueReady:
+    | Promise<{ worker: StoreWorker; source: string }>
+    | undefined;
   private readonly streamers = new Map<string, Promise<StoreWorker>>();
   private closing = false;
   private readonly ingress = new Map<string, Ingress>();
@@ -141,9 +144,11 @@ export class AsyncStore {
 
   private constructor(
     dataDir: string,
+    secretKey: Buffer,
     reportDrainError: (streamerId: string, error: unknown) => void,
   ) {
     this.dataDir = dataDir;
+    this.secretKey = secretKey;
     this.reportDrainError = reportDrainError;
   }
 
@@ -152,22 +157,56 @@ export class AsyncStore {
     secretKey: Buffer,
     reportDrainError: (streamerId: string, error: unknown) => void,
   ) {
-    const store = new AsyncStore(dataDir, reportDrainError);
+    const store = new AsyncStore(dataDir, secretKey, reportDrainError);
     try {
-      store.metadata = new StoreWorker({ dataDir, secretKey });
-      store.queue = new StoreWorker({ dataDir, queue: true });
-      await Promise.all([store.metadata.ready, store.queue.ready]);
-      const { source, streamers } = await store.queue.call<{
-        source: string;
-        streamers: string[];
-      }>('queueState');
-      store.queueSource = source;
-      for (const id of streamers) store.scheduleDrain(id);
+      await store.metadataWorker().ready;
+      await store.queueWorker();
       return store;
     } catch (error) {
       await Promise.allSettled([store.metadata?.close(), store.queue?.close()]);
       throw error;
     }
+  }
+
+  private metadataWorker() {
+    if (this.metadata) return this.metadata;
+    const worker = new StoreWorker(
+      { dataDir: this.dataDir, secretKey: this.secretKey },
+      () => {
+        if (this.metadata === worker) this.metadata = undefined;
+      },
+    );
+    this.metadata = worker;
+    return worker;
+  }
+
+  private queueWorker() {
+    if (this.queueReady) return this.queueReady;
+    const worker = new StoreWorker(
+      { dataDir: this.dataDir, queue: true },
+      () => {
+        if (this.queue === worker) {
+          this.queue = undefined;
+          this.queueReady = undefined;
+        }
+      },
+    );
+    this.queue = worker;
+    this.queueReady = (async () => {
+      try {
+        await worker.ready;
+        const { source, streamers } = await worker.call<{
+          source: string;
+          streamers: string[];
+        }>('queueState');
+        for (const id of streamers) this.scheduleDrain(id);
+        return { worker, source };
+      } catch (error) {
+        await worker.close().catch(() => worker.worker.terminate());
+        throw error;
+      }
+    })();
+    return this.queueReady;
   }
 
   private streamerWorker(
@@ -224,7 +263,8 @@ export class AsyncStore {
   private read<T>(method: string, ...args: unknown[]): Promise<T> {
     if (this.closing)
       return Promise.reject(new ApiError(503, 'DB를 종료하고 있습니다.'));
-    return this.track(this.metadata.call<T>(method, args));
+    const worker = this.metadataWorker();
+    return this.track(worker.ready.then(() => worker.call<T>(method, args)));
   }
 
   private write<T>(id: string, action: () => Promise<T>): Promise<T> {
@@ -387,8 +427,13 @@ export class AsyncStore {
         delay(20)
           .then(async () => {
             batch.sealed = true;
-            await this.queue.call('appendWrites', [key, batch.entries]);
-            this.scheduleDrain(key);
+            try {
+              const { worker } = await this.queueWorker();
+              await worker.call('appendWrites', [key, batch.entries]);
+            } finally {
+              // The worker can exit after committing the batch but before acknowledging it.
+              this.scheduleDrain(key);
+            }
           })
           .finally(() => {
             const remaining =
@@ -416,18 +461,17 @@ export class AsyncStore {
       do {
         this.dirty.delete(id);
         const applied = await this.write(id, async () => {
-          const entries = await this.queue.call<QueuedEntry[]>('nextWrites', [
-            id,
-          ]);
+          const { worker, source } = await this.queueWorker();
+          const entries = await worker.call<QueuedEntry[]>('nextWrites', [id]);
           const last = entries.at(-1);
           if (!last) return false;
           await this.streamerRequest<void>(
             id,
             'applyQueuedWrites',
-            this.queueSource,
+            source,
             entries,
           );
-          await this.queue.call('discardWrites', [id, last.id]);
+          await worker.call('discardWrites', [id, last.id]);
           return true;
         });
         if (applied) this.dirty.add(id);
@@ -453,8 +497,9 @@ export class AsyncStore {
     const pending = this.ingress.get(key)?.saved;
     return this.write(broadcast.streamer_id, async () => {
       await pending?.catch(() => {});
+      const { worker } = await this.queueWorker();
       if (
-        await this.queue.call<boolean>('hasQueuedBroadcast', [
+        await worker.call<boolean>('hasQueuedBroadcast', [
           key,
           broadcast.broadcast_no,
         ])
@@ -493,8 +538,8 @@ export class AsyncStore {
       ...[...this.streamers.values()].map(async (worker) =>
         (await worker).close(),
       ),
-      this.metadata.close(),
-      this.queue.close(),
+      this.metadata?.close(),
+      this.queue?.close(),
     ]);
   }
 }
