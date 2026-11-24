@@ -13,7 +13,12 @@ import {
 } from 'soop-chat';
 
 import type { AsyncStore } from './async-store.ts';
-import type { StoredEvent, Streamer } from './types.ts';
+import {
+  type StorageErrorDetails,
+  type StoredEvent,
+  type Streamer,
+  storageErrorDetails,
+} from './types.ts';
 
 export type ChatFactory = (
   options: NodeSoopChatOptions,
@@ -47,6 +52,12 @@ const lookupBroadcast: BroadcastLookup = async (id, signal) => {
 };
 
 type State = 'stopped' | 'waiting' | 'connecting' | 'collecting' | 'error';
+type StorageOperation = 'getStreamer' | 'restart' | 'markEnded' | 'saveEvent';
+type StorageFailure = StorageErrorDetails & {
+  streamerId: string;
+  broadcastNo: string;
+  operation: StorageOperation;
+};
 type Runner = {
   streamer: Streamer;
   chat: ReturnType<ChatFactory>;
@@ -72,6 +83,9 @@ export class Collector {
   readonly createChat: ChatFactory;
   readonly resolverOverride: ChannelResolver | undefined;
   readonly lookupBroadcast: BroadcastLookup;
+  private readonly reportStorageError:
+    | ((failure: StorageFailure) => void)
+    | undefined;
   private readonly restarting = new Map<string, number>();
   private closing = false;
   private authentication: Promise<SoopAuthentication> | undefined;
@@ -83,11 +97,13 @@ export class Collector {
     createChat: ChatFactory = (options) => new SoopChat(options),
     resolver?: ChannelResolver,
     broadcastLookup: BroadcastLookup = lookupBroadcast,
+    reportStorageError?: (failure: StorageFailure) => void,
   ) {
     this.store = store;
     this.createChat = createChat;
     this.resolverOverride = resolver;
     this.lookupBroadcast = broadcastLookup;
+    this.reportStorageError = reportStorageError;
   }
 
   private resolve: ChannelResolver = async (id, context) => {
@@ -301,16 +317,19 @@ export class Collector {
         runner.blockedBroadcastNo = null;
       }
       if (!broadcastNo) throw new BroadcastOfflineError(id);
+      const targetBroadcastNo = broadcastNo;
       runner.state = 'connecting';
       try {
         const streamer = await this.store.getStreamer(id);
         if (!runner.active || runner.fatal) return;
         if (streamer.room_password !== runner.streamer.room_password) {
-          void this.restart(id).catch(() => this.failStorage(runner));
+          void this.restart(id).catch((error: unknown) =>
+            this.failStorage(runner, targetBroadcastNo, 'restart', error),
+          );
           return;
         }
-      } catch {
-        this.failStorage(runner);
+      } catch (error) {
+        this.failStorage(runner, targetBroadcastNo, 'getStreamer', error);
         return;
       }
       await runner.chat.connect();
@@ -380,7 +399,12 @@ export class Collector {
       });
   }
 
-  private write(runner: Runner, broadcastNo: string, request: Promise<void>) {
+  private write(
+    runner: Runner,
+    broadcastNo: string,
+    operation: StorageOperation,
+    request: Promise<void>,
+  ) {
     const batch = runner.writes.get(request);
     if (batch) {
       batch.add(broadcastNo);
@@ -388,8 +412,9 @@ export class Collector {
     }
     runner.writes.set(request, new Set([broadcastNo]));
     void request
-      .catch(() => {
-        if (runner.active) this.failStorage(runner);
+      .catch((error: unknown) => {
+        if (runner.active)
+          this.failStorage(runner, broadcastNo, operation, error);
       })
       .finally(() => runner.writes.delete(request));
   }
@@ -401,6 +426,7 @@ export class Collector {
     this.write(
       runner,
       broadcastNo,
+      'markEnded',
       this.store.markEnded(runner.streamer.streamer_id, broadcastNo),
     );
   }
@@ -410,6 +436,7 @@ export class Collector {
     this.write(
       runner,
       runner.broadcastNo,
+      'saveEvent',
       this.store.saveEvent(
         runner.streamer.streamer_id,
         runner.broadcastNo,
@@ -440,7 +467,13 @@ export class Collector {
     runner.timer = undefined;
   }
 
-  private failStorage(runner: Runner) {
+  private failStorage(
+    runner: Runner,
+    broadcastNo: string,
+    operation: StorageOperation,
+    error: unknown,
+  ) {
+    if (runner.fatal) return;
     runner.fatal = true;
     runner.controller.abort();
     runner.state = 'error';
@@ -452,6 +485,12 @@ export class Collector {
     this.cancelPoll(runner);
     runner.broadcastNo = null;
     void runner.chat.disconnect().catch(() => {});
+    this.reportStorageError?.({
+      streamerId: runner.streamer.streamer_id,
+      broadcastNo,
+      operation,
+      ...storageErrorDetails(error),
+    });
   }
 
   private async dispose(runner: Runner) {

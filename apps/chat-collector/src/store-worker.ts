@@ -9,6 +9,7 @@ import {
   Store,
   StreamerStore,
 } from './storage.ts';
+import { storageErrorDetails } from './types.ts';
 
 const { dataDir, secretKey, streamerId, queue } = workerData;
 let settings: DatabaseSync | undefined;
@@ -73,6 +74,7 @@ parentPort?.on('message', ({ id, method, args }) => {
       statusCode: error instanceof ApiError ? error.statusCode : 500,
       message:
         error instanceof ApiError ? error.message : 'DB 작업에 실패했습니다.',
+      details: { databaseOperation: method, ...storageErrorDetails(error) },
     });
   }
 });

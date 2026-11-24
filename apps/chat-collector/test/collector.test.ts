@@ -1402,10 +1402,21 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   );
   queue.close();
   const previousCount = f.store.findBroadcast('1002').event_count;
+  const logged = t.mock.method(f.app.log, 'error', () => {});
   chat.emit('event', event());
   await flush();
   assert.equal(f.collector.status(streamer).state, 'error');
   assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
+  assert.equal(logged.mock.callCount(), 1);
+  assert.deepEqual(logged.mock.calls[0]?.arguments[0], {
+    code: 'STORAGE_ERROR',
+    streamerId: 'user123',
+    broadcastNo: '1002',
+    operation: 'saveEvent',
+    databaseOperation: 'appendWrites',
+    errorCode: 'ERR_SQLITE_ERROR',
+    sqliteCode: 1811,
+  });
   t.mock.timers.tick(20_000);
   await flush();
   assert.equal(calls, 4);
@@ -1421,6 +1432,52 @@ test('offline retry at 10 seconds, event routing, broadcast rollover, storage er
   f.chats.at(-1)?.emit('event', event());
   assert.equal(f.store.findBroadcast('1002').event_count, count);
   t.mock.timers.reset();
+});
+
+test('storage stop logs the pending write limit once', async (t) => {
+  const f = await fixture(t);
+  await f.app.ready();
+  const streamer = f.store.addStreamer('user123', null);
+  f.collector.start(streamer);
+  await flush();
+  const chat = f.chats[0];
+  assert.ok(chat);
+  const logged = t.mock.method(f.app.log, 'error', () => {});
+  const message = event();
+  for (let index = 0; index < 10_002; index++) chat.emit('event', message);
+  await flush();
+  assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
+  assert.equal(logged.mock.callCount(), 1);
+  assert.deepEqual(logged.mock.calls[0]?.arguments[0], {
+    code: 'STORAGE_ERROR',
+    streamerId: 'user123',
+    broadcastNo: '1001',
+    operation: 'saveEvent',
+    errorCode: 'QUEUE_LIMIT_EXCEEDED',
+    pendingWrites: 10_000,
+    writeLimit: 10_000,
+  });
+});
+
+test('storage stop logs a failed streamer lookup with its target broadcast', async (t) => {
+  const f = await fixture(t);
+  await f.app.ready();
+  const streamer = f.store.addStreamer('user123', null);
+  f.store.settings.exec('DROP TABLE streamers');
+  const logged = t.mock.method(f.app.log, 'error', () => {});
+  f.collector.start(streamer);
+  await flush();
+  assert.equal(f.collector.status(streamer).lastError?.code, 'STORAGE_ERROR');
+  assert.equal(logged.mock.callCount(), 1);
+  assert.deepEqual(logged.mock.calls[0]?.arguments[0], {
+    code: 'STORAGE_ERROR',
+    streamerId: 'user123',
+    broadcastNo: '1001',
+    operation: 'getStreamer',
+    databaseOperation: 'getStreamer',
+    errorCode: 'ERR_SQLITE_ERROR',
+    sqliteCode: 1,
+  });
 });
 
 test('restricted authentication refreshes once and collects without a manual retry', async (t) => {

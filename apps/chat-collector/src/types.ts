@@ -12,6 +12,42 @@ export class ApiError extends Error {
   }
 }
 
+export type StorageErrorDetails = {
+  databaseOperation?: string;
+  errorCode?: string;
+  sqliteCode?: number;
+  statusCode?: number;
+  workerExitCode?: number;
+  pendingWrites?: number;
+  writeLimit?: number;
+};
+
+export class StorageError extends ApiError {
+  readonly details: StorageErrorDetails;
+
+  constructor(
+    statusCode: number,
+    message: string,
+    details: StorageErrorDetails,
+  ) {
+    super(statusCode, message);
+    this.details = details;
+  }
+}
+
+export function storageErrorDetails(error: unknown): StorageErrorDetails {
+  if (error instanceof StorageError) return error.details;
+  if (error instanceof ApiError) return { statusCode: error.statusCode };
+  const details: StorageErrorDetails = {};
+  if (error instanceof Error) {
+    if ('code' in error && typeof error.code === 'string')
+      details.errorCode = error.code;
+    if ('errcode' in error && typeof error.errcode === 'number')
+      details.sqliteCode = error.errcode;
+  }
+  return details;
+}
+
 export type Streamer = {
   streamer_id: string;
   room_password: string | null;

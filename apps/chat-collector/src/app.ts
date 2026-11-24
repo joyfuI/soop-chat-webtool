@@ -14,7 +14,12 @@ import {
 } from './collector.ts';
 import { downloadBroadcast } from './download.ts';
 import { runQuery } from './query.ts';
-import { ApiError, DAY_MS, MAX_RETENTION_DAYS } from './types.ts';
+import {
+  ApiError,
+  DAY_MS,
+  MAX_RETENTION_DAYS,
+  storageErrorDetails,
+} from './types.ts';
 
 type StreamerParams = { streamerId: string };
 type BroadcastParams = { broadcastNo: string };
@@ -82,9 +87,9 @@ export async function buildApp(options: {
     const store = await AsyncStore.open(
       options.dataDir,
       options.secretKey,
-      (streamerId, err) => {
+      (streamerId, error) => {
         app.log.error(
-          { streamerId, err },
+          { streamerId, ...storageErrorDetails(error) },
           '디스크 대기열의 SQLite 저장에 실패했습니다. 재시도합니다.',
         );
       },
@@ -95,6 +100,12 @@ export async function buildApp(options: {
       options.createChat,
       options.resolveChannel,
       options.lookupBroadcast,
+      (failure) => {
+        app.log.error(
+          { code: 'STORAGE_ERROR', ...failure },
+          '채팅 저장 오류로 수집을 중단했습니다.',
+        );
+      },
     );
     await collector.reloadCredentials();
     const shutdown = new AbortController();

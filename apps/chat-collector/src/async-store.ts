@@ -9,9 +9,14 @@ import {
   ApiError,
   type Broadcast,
   compareBroadcasts,
+  StorageError,
+  type StorageErrorDetails,
   type StoredEvent,
   type Streamer,
+  storageErrorDetails,
 } from './types.ts';
+
+const PENDING_WRITE_LIMIT = 10_000;
 
 class StoreWorker {
   readonly worker: Worker;
@@ -44,18 +49,32 @@ class StoreWorker {
         if (!request) return;
         this.pending.delete(message.id);
         if (message.ok) request.resolve(message.value);
-        else request.reject(new ApiError(message.statusCode, message.message));
+        else
+          request.reject(
+            new StorageError(
+              message.statusCode,
+              message.message,
+              message.details,
+            ),
+          );
       });
-      const fail = () => {
-        this.failure = new ApiError(500, 'DB 워커가 종료되었습니다.');
+      const fail = (details: StorageErrorDetails) => {
+        if (this.failure) return;
+        this.failure = new StorageError(
+          500,
+          'DB 워커가 종료되었습니다.',
+          details,
+        );
         reject(this.failure);
         for (const request of this.pending.values())
           request.reject(this.failure);
         this.pending.clear();
       };
-      this.worker.on('error', fail);
-      this.worker.on('exit', () => {
-        fail();
+      this.worker.on('error', (error) =>
+        fail({ errorCode: 'DB_WORKER_ERROR', ...storageErrorDetails(error) }),
+      );
+      this.worker.on('exit', (workerExitCode) => {
+        fail({ errorCode: 'DB_WORKER_EXITED', workerExitCode });
         onExit?.();
       });
     });
@@ -68,9 +87,14 @@ class StoreWorker {
       this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
       try {
         this.worker.postMessage({ id, method, args });
-      } catch {
+      } catch (error) {
         this.pending.delete(id);
-        reject(new ApiError(500, 'DB 요청을 전달할 수 없습니다.'));
+        reject(
+          new StorageError(500, 'DB 요청을 전달할 수 없습니다.', {
+            databaseOperation: method,
+            ...storageErrorDetails(error),
+          }),
+        );
       }
     });
   }
@@ -342,9 +366,13 @@ export class AsyncStore {
       return Promise.reject(new ApiError(503, 'DB를 종료하고 있습니다.'));
     const key = id.toLowerCase();
     const count = this.unpersisted.get(key) ?? 0;
-    if (count >= 10_000)
+    if (count >= PENDING_WRITE_LIMIT)
       return Promise.reject(
-        new ApiError(503, '디스크 대기열 기록이 지연되고 있습니다.'),
+        new StorageError(503, '디스크 대기열 기록이 지연되고 있습니다.', {
+          errorCode: 'QUEUE_LIMIT_EXCEEDED',
+          pendingWrites: count,
+          writeLimit: PENDING_WRITE_LIMIT,
+        }),
       );
     this.unpersisted.set(key, count + 1);
     const current = this.ingress.get(key);
