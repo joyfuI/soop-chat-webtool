@@ -301,7 +301,7 @@ export class AsyncStore {
     return this.read<void>('updateStreamer', id, changes);
   }
   setEnabled(id: string, enabled: boolean) {
-    return this.read<void>('setEnabled', id, enabled);
+    return this.read<Streamer>('setEnabled', id, enabled);
   }
   removeStreamer(id: string) {
     return this.read<void>('removeStreamer', id);

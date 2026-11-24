@@ -295,13 +295,19 @@ export async function buildApp(options: {
 
     for (const action of ['start', 'stop'] as const) {
       const change = async (id: string) => {
-        const streamer = await store.getStreamer(id);
-        await store.setEnabled(streamer.streamer_id, action === 'start');
-        if (action === 'start') {
-          const current = await store.getStreamer(streamer.streamer_id, false);
-          if (current.registered && current.enabled) collector.start(current);
-        } else await collector.stop(streamer.streamer_id);
-        return collector.status(await store.getStreamer(streamer.streamer_id));
+        try {
+          const streamer = await store.setEnabled(id, action === 'start');
+          if (action === 'start') collector.start(streamer);
+          else await collector.stop(streamer.streamer_id);
+          return collector.status(streamer);
+        } catch (error) {
+          if (
+            action === 'start' &&
+            !(error instanceof ApiError && error.statusCode === 404)
+          )
+            collector.scheduleStartRetry(id);
+          throw error;
+        }
       };
       app.post<{ Params: StreamerParams }>(
         `/api/collection/${action}/:streamerId`,

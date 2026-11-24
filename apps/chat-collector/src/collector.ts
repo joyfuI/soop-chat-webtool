@@ -14,11 +14,14 @@ import {
 
 import type { AsyncStore } from './async-store.ts';
 import {
+  ApiError,
   type StorageErrorDetails,
   type StoredEvent,
   type Streamer,
   storageErrorDetails,
 } from './types.ts';
+
+const RETRY_INTERVAL_MS = 10_000;
 
 export type ChatFactory = (
   options: NodeSoopChatOptions,
@@ -87,6 +90,10 @@ export class Collector {
     | ((failure: StorageFailure) => void)
     | undefined;
   private readonly restarting = new Map<string, number>();
+  private readonly startRetries = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   private closing = false;
   private authentication: Promise<SoopAuthentication> | undefined;
   private authController = new AbortController();
@@ -199,8 +206,10 @@ export class Collector {
       previous?.active &&
       !previous.storageFailed &&
       !previous.blockedBroadcastNo
-    )
+    ) {
+      this.cancelStartRetry(streamer.streamer_id);
       return;
+    }
     lastBroadcastNo ??= previous?.lastBroadcastNo ?? null;
     const runner: Runner = {
       streamer,
@@ -287,8 +296,39 @@ export class Collector {
       }),
     );
     this.runners.set(streamer.streamer_id, runner);
+    this.cancelStartRetry(streamer.streamer_id);
     if (previous?.active) void this.dispose(previous);
     this.attempt(runner);
+  }
+
+  scheduleStartRetry(id: string) {
+    const key = id.toLowerCase();
+    if (this.closing || this.startRetries.has(key)) return;
+    const timer = setTimeout(async () => {
+      try {
+        const streamer = await this.store.getStreamer(id, false);
+        if (this.startRetries.get(key) !== timer) return;
+        if (
+          streamer.registered &&
+          streamer.enabled &&
+          !this.runners.has(streamer.streamer_id)
+        )
+          this.start(streamer);
+        this.startRetries.delete(key);
+      } catch (error) {
+        if (this.startRetries.get(key) !== timer) return;
+        this.startRetries.delete(key);
+        if (!(error instanceof ApiError && error.statusCode === 404))
+          this.scheduleStartRetry(id);
+      }
+    }, RETRY_INTERVAL_MS);
+    this.startRetries.set(key, timer);
+  }
+
+  private cancelStartRetry(id: string) {
+    const key = id.toLowerCase();
+    clearTimeout(this.startRetries.get(key));
+    this.startRetries.delete(key);
   }
 
   private async findBroadcast(runner: Runner, check?: AbortSignal) {
@@ -458,7 +498,7 @@ export class Collector {
         else if (collecting) this.checkBroadcast(runner);
         else this.attempt(runner);
       },
-      collecting ? 30_000 : 10_000,
+      collecting ? 30_000 : RETRY_INTERVAL_MS,
     );
   }
 
@@ -535,6 +575,7 @@ export class Collector {
   }
 
   async stop(id: string) {
+    this.cancelStartRetry(id);
     await this.detach(id);
     await this.store.waitForWrites(id);
   }
@@ -572,6 +613,8 @@ export class Collector {
   async shutdown() {
     this.closing = true;
     this.authController.abort();
+    for (const timer of this.startRetries.values()) clearTimeout(timer);
+    this.startRetries.clear();
     await Promise.all([...this.runners.keys()].map((id) => this.stop(id)));
   }
 }

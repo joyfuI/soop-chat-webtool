@@ -211,12 +211,14 @@ export class Store {
       );
   }
 
-  setEnabled(id: string, enabled: boolean) {
-    this.settings
+  setEnabled(id: string, enabled: boolean): Streamer {
+    const streamer = this.settings
       .prepare(
-        'UPDATE streamers SET enabled = ?, updated_at = ? WHERE streamer_id = ?',
+        'UPDATE streamers SET enabled = ?, updated_at = ? WHERE streamer_id = ? AND registered = 1 RETURNING *',
       )
-      .run(Number(enabled), Date.now(), this.getStreamer(id).streamer_id);
+      .get(Number(enabled), Date.now(), id) as Streamer | undefined;
+    if (!streamer) throw new ApiError(404, '스트리머를 찾을 수 없습니다.');
+    return streamer;
   }
 
   removeStreamer(id: string) {

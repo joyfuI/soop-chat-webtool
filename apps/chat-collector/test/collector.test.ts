@@ -2534,6 +2534,113 @@ test('account changes and clearing preserve collection and apply credentials on 
   ]);
 });
 
+test('the start API uses the updated streamer settings without fetching them again', async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  const getStreamer = f.backend.getStreamer.bind(f.backend);
+  t.mock.method(
+    f.backend,
+    'getStreamer',
+    (id: string, registeredOnly?: boolean) => {
+      if (registeredOnly === false)
+        return Promise.reject(
+          new Error('unexpected follow-up settings lookup'),
+        );
+      return getStreamer(id, registeredOnly);
+    },
+  );
+  const started = await f.call('POST', '/api/collection/start/USER123');
+  assert.equal(started.statusCode, 200);
+  assert.equal(started.json().streamerId, 'user123');
+  assert.equal(started.json().enabled, true);
+  await flush();
+  assert.equal(
+    f.collector.status(f.store.getStreamer('user123')).state,
+    'collecting',
+  );
+});
+
+test('collection recovers when the start write commits but its acknowledgement is lost', async (t) => {
+  const f = await fixture(t);
+  await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const metadata = Reflect.get(f.backend, 'metadata') as {
+    worker: Worker;
+    call(method: string, args?: unknown[]): Promise<unknown>;
+  };
+  const call = metadata.call.bind(metadata);
+  t.mock.method(metadata, 'call', async (method: string, args?: unknown[]) => {
+    const result = await call(method, args);
+    if (method === 'setEnabled') {
+      await metadata.worker.terminate();
+      throw new Error('lost acknowledgement');
+    }
+    return result;
+  });
+  const started = await f.call('POST', '/api/collection/start/user123');
+  assert.equal(started.statusCode, 500);
+  const streamer = f.store.getStreamer('user123');
+  assert.equal(streamer.enabled, 1);
+  assert.equal(f.collector.status(streamer).state, 'stopped');
+
+  const lookup = t.mock.method(f.backend, 'getStreamer');
+  lookup.mock.mockImplementationOnce(async () => {
+    throw new Error('settings unavailable');
+  });
+  t.mock.timers.tick(9_999);
+  await flush();
+  assert.equal(lookup.mock.callCount(), 0);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(lookup.mock.callCount(), 1);
+  assert.equal(f.chats.length, 0);
+
+  t.mock.timers.tick(10_000);
+  await flush();
+  assert.notEqual(Reflect.get(f.backend, 'metadata'), metadata);
+  assert.equal(f.chats.length, 1);
+  assert.equal(f.collector.status(streamer).state, 'collecting');
+  assert.equal(f.store.findBroadcast('1001').event_count, 1);
+});
+
+test('stop and unregister cancel a pending start retry', async (t) => {
+  for (const action of ['stop', 'unregister'] as const) {
+    await t.test(action, async (t) => {
+      const f = await fixture(t);
+      await f.call('POST', '/api/streamers', { streamerId: 'user123' });
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const createChat = t.mock.method(f.collector, 'createChat');
+      createChat.mock.mockImplementationOnce(() => {
+        throw new Error('cannot create chat');
+      });
+      const started = await f.call('POST', '/api/collection/start/USER123');
+      assert.equal(started.statusCode, 500);
+      const enabled = f.store.getStreamer('user123');
+      assert.equal(enabled.enabled, 1);
+
+      const { promise, resolve } = Promise.withResolvers<typeof enabled>();
+      const lookup = t.mock.method(f.backend, 'getStreamer');
+      lookup.mock.mockImplementationOnce(() => promise);
+      t.mock.timers.tick(10_000);
+      await flush();
+      assert.equal(lookup.mock.callCount(), 1);
+
+      const stopped =
+        action === 'stop'
+          ? await f.call('POST', '/api/collection/stop/user123')
+          : await f.call('DELETE', '/api/streamers/user123');
+      assert.equal(stopped.statusCode, action === 'stop' ? 200 : 204);
+      resolve(enabled);
+      t.mock.timers.tick(30_000);
+      await flush();
+      assert.equal(createChat.mock.callCount(), 1);
+      const streamer = f.store.getStreamer('user123', false);
+      assert.equal(streamer.enabled, 0);
+      assert.equal(f.collector.status(streamer).state, 'stopped');
+    });
+  }
+});
+
 test('start/stop idempotence, active deletion, reconnect configuration and automatic resume', async (t) => {
   let broadcastNo = '1001';
   const f = await fixture(t, async () => channel(broadcastNo));
