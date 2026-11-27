@@ -271,8 +271,7 @@ LIMIT 100;`,
           }}
         >
           <Typography color="text.secondary" variant="body2">
-            events · broadcasts 테이블 / 행 제한은 WHERE·LIMIT으로 지정 / 서버
-            실행 제한 30초
+            events · broadcasts 테이블 / 행 제한은 WHERE·LIMIT으로 지정
           </Typography>
           <Stack direction="row" spacing={1}>
             <Button
